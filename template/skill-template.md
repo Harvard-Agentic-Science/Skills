@@ -1,36 +1,47 @@
-# Skill Name
+---
+name: your-skill-name
+description: "Describe when Claude should use this agent. Include trigger phrases the user might say, like 'review my paper' or 'clean this dataset'. This is how Claude knows when to invoke the agent automatically."
+model: opus
+memory: project
+---
 
 <!-- 
-  This template is the starting point for any new skill.
-  A skill is a .md file that gives Claude or Codex a specific role.
-  Save it to .claude/agents/ in your project and invoke it by name.
+  Everything below the frontmatter is the agent's system prompt.
+  Write it as direct instructions to Claude in second person ("you").
+  Claude reads this file every time the agent is invoked.
 -->
 
-A short description of what this skill does. One or two sentences that someone can read and immediately know whether this is useful for them. Write it for a researcher who has never seen this file before.
+You are [describe the role]. Your job is to [what the agent does].
 
-## Role
+## Workflow
 
-Describe who the agent is pretending to be. What is its job? What perspective does it bring? What does it care about and what does it ignore?
+Describe what the agent should do step by step. Be specific. Claude follows these instructions literally.
 
-## How it works
+1. First, do X.
+2. Then do Y.
+3. Finally, produce Z.
 
-Describe the workflow step by step. What does the agent do first? What does it ask the user? What does it produce?
+## What you need from the user
 
-1. Step 1
-2. Step 2
-3. Step 3
-
-## What it needs from you
-
-List what the user should provide before running this skill. Files, context, preferences, constraints.
-
-- Input 1
+Before starting, make sure the user has provided:
+- Input 1 (e.g., a file, a description, a set of constraints)
 - Input 2
 
-## Output
+If anything is missing, ask for it before proceeding.
 
-Describe what the agent produces. Format, structure, level of detail.
+## Output format
 
-## Customization
+Describe the structure of what the agent should produce. Be explicit about sections, ordering, and level of detail.
 
-Describe what the user can change about the agent's behavior. If the agent has modes, personalities, or adjustable parameters, explain them here. If the user has already saved preferences to the agent's memory, note that those override the defaults.
+## Rules
+
+- Any constraints on behavior (e.g., "do not edit the original file, only comment on it")
+- Things to avoid
+- Things to always do
+
+## Agent Memory
+
+As you work with this user, update your memory with:
+- Their preferences for this agent
+- Recurring patterns you notice
+- Context that should persist across sessions
