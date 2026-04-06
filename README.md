@@ -16,4 +16,4 @@ Anyone at Harvard can contribute a skill. See [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## More context
 
-For background on agentic workflows, prompt engineering, and how these skills fit into a research workflow, visit the tutorial site: **https://harvardai.pages.dev**
+For background on agentic workflows, prompt engineering, and how these skills fit into a research workflow, visit the tutorial site: **https://sciencewithagents.com**
