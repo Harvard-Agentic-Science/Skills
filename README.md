@@ -31,4 +31,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full walkthrough.
 
 ## More context
 
-For background on agentic workflows and how skills fit into a research workflow, visit **https://sciencewithagents.com**
+For background on agentic workflows and how skills fit into a research workflow, visit **https://ai.physics.harvard.edu**
