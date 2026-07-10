@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOGIN_HOST="${FASRC_LOGIN_HOST:-fasrc}"
+REMOTE_ALIAS="${FASRC_COMPUTE_ALIAS:-fasrc-compute}"
+JOB_NAME="${FASRC_JOB_NAME:-fasrc}"
+STATE_DIR="${FASRC_STATE_DIR:-$HOME/.local/state/fasrc}"
+STATE_FILE="$STATE_DIR/current.env"
+PROBE_TIMEOUT="${FASRC_PROXY_PROBE_TIMEOUT:-25}"
+
+die() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+detect_remote_user() {
+  local user
+  user="$(ssh -G "$LOGIN_HOST" 2>/dev/null | awk '/^user / {print $2; exit}')"
+  if [[ -n "$user" ]]; then
+    printf '%s\n' "$user"
+    return
+  fi
+  printf '%s\n' "$USER"
+}
+
+find_job_entry() {
+  local jobs="$1"
+  local target_job="$2"
+  local job_id node
+
+  while IFS='|' read -r job_id node; do
+    [[ -n "$job_id" ]] || continue
+    if [[ "$job_id" == "$target_job" ]]; then
+      printf '%s|%s\n' "$job_id" "$node"
+      return 0
+    fi
+  done <<<"$jobs"
+
+  return 1
+}
+
+require_cached_login_connection() {
+  if ssh -O check "$LOGIN_HOST" >/dev/null 2>&1; then
+    return
+  fi
+
+  cat >&2 <<EOF
+No active cached SSH login for $LOGIN_HOST.
+Run 'fasrc' from a local terminal to refresh FASRC authentication, then reconnect to $REMOTE_ALIAS.
+Direct VS Code connections to $REMOTE_ALIAS use ProxyCommand and cannot collect FASRC password/2FA prompts reliably.
+EOF
+  exit 1
+}
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+
+  perl -e '
+    use strict;
+    use warnings;
+
+    my $timeout = shift @ARGV;
+    my $pid = fork();
+    die "fork failed\n" unless defined $pid;
+
+    if ($pid == 0) {
+      exec @ARGV;
+      exit 127;
+    }
+
+    local $SIG{ALRM} = sub {
+      kill "TERM", $pid;
+      select undef, undef, undef, 0.5;
+      kill "KILL", $pid;
+      exit 124;
+    };
+
+    alarm $timeout;
+    waitpid($pid, 0);
+    exit($? == -1 ? 1 : ($? & 127 ? 128 + ($? & 127) : (($? >> 8) & 255)));
+  ' "$seconds" "$@"
+}
+
+node_is_reachable() {
+  local node="$1"
+
+  [[ "$node" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+
+  run_with_timeout "$PROBE_TIMEOUT" ssh -n \
+    -o BatchMode=yes \
+    -o NumberOfPasswordPrompts=0 \
+    -o ConnectionAttempts=1 \
+    -o ConnectTimeout=8 \
+    -o ServerAliveInterval=3 \
+    -o ServerAliveCountMax=1 \
+    -o ProxyJump="$LOGIN_HOST" \
+    -l "$remote_user" \
+    "$node" 'printf ready' >/dev/null 2>&1
+}
+
+choose_default_entry() {
+  local jobs="$1"
+  local saved_job=""
+  local best_job=""
+  local best_node=""
+  local job_id node
+
+  if [[ -f "$STATE_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
+    saved_job="${CURRENT_JOB:-}"
+  fi
+
+  if [[ -n "$saved_job" ]]; then
+    if saved_entry="$(find_job_entry "$jobs" "$saved_job")"; then
+      saved_node="${saved_entry#*|}"
+      if node_is_reachable "$saved_node"; then
+        printf '%s\n' "$saved_entry"
+        return 0
+      fi
+      printf 'Saved %s job %s is active but its compute node is not responding; trying another active job.\n' "$JOB_NAME" "$saved_job" >&2
+    fi
+  fi
+
+  while IFS='|' read -r job_id node; do
+    [[ -n "$job_id" ]] || continue
+    if node_is_reachable "$node"; then
+      printf '%s|%s\n' "$job_id" "$node"
+      return 0
+    fi
+    printf 'Skipping %s job %s because %s is not responding over SSH.\n' "$JOB_NAME" "$job_id" "$node" >&2
+  done < <(printf '%s\n' "$jobs" | sort -t'|' -k1,1nr)
+
+  while IFS='|' read -r job_id node; do
+    [[ -n "$job_id" ]] || continue
+    if [[ -z "$best_job" || "$job_id" -gt "$best_job" ]]; then
+      best_job="$job_id"
+      best_node="$node"
+    fi
+  done <<<"$jobs"
+
+  [[ -n "$best_job" ]] || return 1
+  die "Active $JOB_NAME jobs exist, but none of their compute nodes responded over SSH."
+}
+
+remote_user="$(detect_remote_user)"
+require_cached_login_connection
+jobs="$(
+  ssh "$LOGIN_HOST" "bash -s" -- "$remote_user" "$JOB_NAME" <<'REMOTE'
+set -euo pipefail
+
+remote_user="$1"
+job_name="$2"
+
+squeue -u "$remote_user" -h -o '%A|%T|%N|%j' | awk -F'|' -v job_name="$job_name" '
+  $4 == job_name && $2 == "RUNNING" && $3 != "(null)" && $3 != "n/a" {
+    print $1 "|" $3
+  }
+'
+REMOTE
+)"
+
+[[ -n "$jobs" ]] || die "No active $JOB_NAME jobs. Run 'fasrc new ...' to allocate one."
+
+target_entry="$(choose_default_entry "$jobs")" || die "No usable $JOB_NAME job found."
+target_job="${target_entry%%|*}"
+target_node="${target_entry#*|}"
+
+[[ "$target_node" =~ ^[A-Za-z0-9._-]+$ ]] || die "Refusing unexpected node name for $target_job: $target_node"
+
+mkdir -p "$STATE_DIR"
+printf 'CURRENT_JOB=%q\n' "$target_job" >"$STATE_FILE"
+
+printf '%s resolved to job %s on %s\n' "$REMOTE_ALIAS" "$target_job" "$target_node" >&2
+exec ssh "$LOGIN_HOST" -W "$target_node:22"
