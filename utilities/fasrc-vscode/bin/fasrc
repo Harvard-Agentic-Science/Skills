@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+CONFIG_DIR="${FASRC_CONFIG_DIR:-$HOME/.config/fasrc}"
+DEFAULTS_FILE="${FASRC_DEFAULTS_FILE:-$CONFIG_DIR/defaults.env}"
+if [[ -f "$DEFAULTS_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$DEFAULTS_FILE"
+fi
+
 LOGIN_HOST="${FASRC_LOGIN_HOST:-fasrc}"
 REMOTE_ALIAS="${FASRC_COMPUTE_ALIAS:-fasrc-compute}"
 JOB_NAME="${FASRC_JOB_NAME:-fasrc}"
@@ -9,12 +16,19 @@ PROXY_COMMAND="${FASRC_PROXY_COMMAND:-$SCRIPT_DIR/fasrc-proxy}"
 DEFAULT_TIME="${FASRC_DEFAULT_TIME:-70:00:00}"
 DEFAULT_CPUS="${FASRC_DEFAULT_CPUS:-8}"
 DEFAULT_MEM="${FASRC_DEFAULT_MEM:-16G}"
+DEFAULT_NEW_COUNT="${FASRC_DEFAULT_NEW_COUNT:-1}"
+DEFAULT_REMOTE_PATH="${FASRC_DEFAULT_REMOTE_PATH:-}"
+DEFAULT_PARTITION="${FASRC_DEFAULT_PARTITION:-}"
+DEFAULT_ACCOUNT="${FASRC_DEFAULT_ACCOUNT:-}"
+DEFAULT_CONSTRAINT="${FASRC_DEFAULT_CONSTRAINT:-}"
+DEFAULT_GRES="${FASRC_DEFAULT_GRES:-}"
+DEFAULT_QOS="${FASRC_DEFAULT_QOS:-}"
+DEFAULT_RESERVATION="${FASRC_DEFAULT_RESERVATION:-}"
 MAX_SLURM_TIME="${FASRC_MAX_SLURM_TIME:-72:00:00}"
 LOCAL_PUBKEY="${FASRC_LOCAL_PUBKEY:-$HOME/.ssh/id_ed25519.pub}"
 SSH_INCLUDE="${FASRC_SSH_INCLUDE_FILE:-$HOME/.ssh/fasrc_compute_config}"
 STATE_DIR="${FASRC_STATE_DIR:-$HOME/.local/state/fasrc}"
 STATE_FILE="$STATE_DIR/current.env"
-CONFIG_DIR="${FASRC_CONFIG_DIR:-$HOME/.config/fasrc}"
 EXTENSIONS_FILE="${FASRC_VSCODE_EXTENSIONS_FILE:-$CONFIG_DIR/extensions.txt}"
 VSCODE_QUALITY="${FASRC_VSCODE_QUALITY:-stable}"
 VSCODE_RELEASES_URL="${FASRC_VSCODE_RELEASES_URL:-https://update.code.visualstudio.com/api/releases/$VSCODE_QUALITY}"
@@ -388,6 +402,7 @@ EOF
     env|environment|config)
       cat <<'EOF'
 Environment variables:
+  FASRC_DEFAULTS_FILE               Personal defaults file. Default: ~/.config/fasrc/defaults.env
   FASRC_LOGIN_HOST                  SSH host for the login node. Default: fasrc
   FASRC_COMPUTE_ALIAS               Generic compute alias. Default: fasrc-compute
   FASRC_JOB_NAME                    SLURM job name to discover. Default: fasrc
@@ -395,6 +410,14 @@ Environment variables:
   FASRC_DEFAULT_TIME                Default new-job wall time. Default: 70:00:00
   FASRC_DEFAULT_CPUS                Default new-job CPUs per task. Default: 8
   FASRC_DEFAULT_MEM                 Default new-job memory. Default: 16G
+  FASRC_DEFAULT_NEW_COUNT           Default count for fasrc new/--new. Default: 1
+  FASRC_DEFAULT_REMOTE_PATH         Remote path to open when no path is supplied.
+  FASRC_DEFAULT_PARTITION           Default SLURM partition for new jobs.
+  FASRC_DEFAULT_ACCOUNT             Default SLURM account for new jobs.
+  FASRC_DEFAULT_CONSTRAINT          Default SLURM constraint for new jobs.
+  FASRC_DEFAULT_GRES                Default SLURM gres request for new jobs.
+  FASRC_DEFAULT_QOS                 Default SLURM QOS for new jobs.
+  FASRC_DEFAULT_RESERVATION         Default SLURM reservation for new jobs.
   FASRC_MAX_SLURM_TIME              Maximum allowed new-job wall time. Default: 72:00:00
   FASRC_CONFIG_DIR                  Config directory. Default: ~/.config/fasrc
   FASRC_VSCODE_EXTENSIONS_FILE      Extension list. Default: ~/.config/fasrc/extensions.txt
@@ -579,6 +602,7 @@ probe_compute_alias() {
 
   run_with_timeout "$SSH_PROBE_TIMEOUT" \
     ssh \
+      -n \
       -o BatchMode=yes \
       -o NumberOfPasswordPrompts=0 \
       -o ConnectionAttempts=1 \
@@ -1030,7 +1054,7 @@ REMOTE
 }
 
 remote_home() {
-  ssh "$LOGIN_HOST" 'printf "%s" "$HOME"'
+  ssh -n "$LOGIN_HOST" 'printf "%s" "$HOME"'
 }
 
 vscode_server_install_root() {
@@ -1071,7 +1095,7 @@ REMOTE
 
 allocate_new_job() {
   local output job_id node
-  output="$(ssh "$LOGIN_HOST" "~/.local/bin/fasrc-alloc" "$@")"
+  output="$(ssh -n "$LOGIN_HOST" "~/.local/bin/fasrc-alloc" "$@")"
   [[ -n "$output" ]] || die "Allocator returned no output."
 
   job_id="${output%%|*}"
@@ -1464,7 +1488,7 @@ setup_vscode_cmd() {
 
   printf 'Remote VS Code server root: %s\n' "$install_root"
 
-  while IFS='|' read -r job_id node; do
+  while IFS='|' read -r job_id node <&3; do
     [[ -n "$job_id" ]] || continue
     alias="$(job_alias "$job_id")"
 
@@ -1487,7 +1511,7 @@ setup_vscode_cmd() {
     else
       printf 'Updated VS Code settings for %s.\n' "$alias"
     fi
-  done <<<"$selected_jobs"
+  done 3<<<"$selected_jobs"
 
   if [[ "$failures" -gt 0 ]]; then
     return 1
@@ -1512,15 +1536,23 @@ refresh_local_config() {
 
 launch_cmd() {
   local open_path=""
+  local open_path_set=0
   local no_open=0
   local force_new=0
   local allocated_new=0
   local requested_job=""
   local requested_time=""
   local count=1
+  local count_set=0
   local time_set=0
   local cpus_set=0
   local mem_set=0
+  local partition_set=0
+  local account_set=0
+  local constraint_set=0
+  local gres_set=0
+  local qos_set=0
+  local reservation_set=0
   local -a alloc_args=()
   local jobs="" target_entry="" target_entries="" target_job="" target_alias="" home_path="" install_root="" uri=""
 
@@ -1534,6 +1566,7 @@ launch_cmd() {
         [[ $# -ge 2 ]] || die "Missing value for $1"
         require_positive_integer "count" "$2"
         count="$2"
+        count_set=1
         force_new=1
         shift 2
         ;;
@@ -1560,9 +1593,15 @@ launch_cmd() {
       --mem|--partition|--account|--constraint|--gres|--qos|--reservation)
         [[ $# -ge 2 ]] || die "Missing value for $1"
         alloc_args+=("$1" "$2")
-        if [[ "$1" == "--mem" ]]; then
-          mem_set=1
-        fi
+        case "$1" in
+          --mem) mem_set=1 ;;
+          --partition) partition_set=1 ;;
+          --account) account_set=1 ;;
+          --constraint) constraint_set=1 ;;
+          --gres) gres_set=1 ;;
+          --qos) qos_set=1 ;;
+          --reservation) reservation_set=1 ;;
+        esac
         force_new=1
         shift 2
         ;;
@@ -1582,16 +1621,25 @@ launch_cmd() {
         die "Unknown option: $1. Use -- for raw sbatch args."
         ;;
       *)
-        [[ -z "$open_path" ]] || die "Only one remote path can be supplied."
+        ((open_path_set == 0)) || die "Only one remote path can be supplied."
         open_path="$1"
+        open_path_set=1
         shift
         ;;
     esac
   done
 
+  if ((open_path_set == 0)) && [[ -n "$DEFAULT_REMOTE_PATH" ]]; then
+    open_path="$DEFAULT_REMOTE_PATH"
+  fi
+
   [[ -z "$requested_job" || "$force_new" -eq 0 ]] || die "Use either --job or --new/allocation options, not both."
 
   if ((force_new)); then
+    if ((count_set == 0)); then
+      require_positive_integer "FASRC_DEFAULT_NEW_COUNT" "$DEFAULT_NEW_COUNT"
+      count="$DEFAULT_NEW_COUNT"
+    fi
     if ((time_set)); then
       require_slurm_time_within_limit "$requested_time"
     else
@@ -1631,6 +1679,12 @@ launch_cmd() {
     ((time_set)) || alloc_args+=(--time "$DEFAULT_TIME")
     ((cpus_set)) || alloc_args+=(--cpus-per-task "$DEFAULT_CPUS")
     ((mem_set)) || alloc_args+=(--mem "$DEFAULT_MEM")
+    ((partition_set)) || [[ -z "$DEFAULT_PARTITION" ]] || alloc_args+=(--partition "$DEFAULT_PARTITION")
+    ((account_set)) || [[ -z "$DEFAULT_ACCOUNT" ]] || alloc_args+=(--account "$DEFAULT_ACCOUNT")
+    ((constraint_set)) || [[ -z "$DEFAULT_CONSTRAINT" ]] || alloc_args+=(--constraint "$DEFAULT_CONSTRAINT")
+    ((gres_set)) || [[ -z "$DEFAULT_GRES" ]] || alloc_args+=(--gres "$DEFAULT_GRES")
+    ((qos_set)) || [[ -z "$DEFAULT_QOS" ]] || alloc_args+=(--qos "$DEFAULT_QOS")
+    ((reservation_set)) || [[ -z "$DEFAULT_RESERVATION" ]] || alloc_args+=(--reservation "$DEFAULT_RESERVATION")
     if ((count > 1)); then
       printf 'Allocating %s new jobs in parallel...\n' "$count" >&2
     fi
@@ -1658,7 +1712,7 @@ launch_cmd() {
   home_path="$(remote_home)"
   install_root="$(vscode_server_install_root "$home_path")"
 
-  while IFS='|' read -r target_job _node; do
+  while IFS='|' read -r target_job _node <&3; do
     [[ -n "$target_job" ]] || continue
     target_alias="$(job_alias "$target_job")"
 
@@ -1670,23 +1724,23 @@ launch_cmd() {
     fi
 
     ensure_vscode_remote_settings "$target_alias" "$install_root"
-  done <<<"$target_entries"
+  done 3<<<"$target_entries"
 
   if ((no_open)); then
     return
   fi
 
   prepare_code_cli_limits
-  while IFS='|' read -r target_job _node; do
+  while IFS='|' read -r target_job _node <&3; do
     [[ -n "$target_job" ]] || continue
     target_alias="$(job_alias "$target_job")"
     uri="$(build_remote_uri "$target_alias" "$home_path" "$open_path")"
     if [[ "${FASRC_REUSE_WINDOW:-0}" == "1" ]]; then
-      code --folder-uri "$uri"
+      code --folder-uri "$uri" </dev/null
     else
-      code --new-window --folder-uri "$uri"
+      code --new-window --folder-uri "$uri" </dev/null
     fi
-  done <<<"$target_entries"
+  done 3<<<"$target_entries"
 }
 
 bootstrap_cmd() {
@@ -1776,7 +1830,7 @@ stop_cmd() {
     cancel_ids=" $current_job"
   fi
 
-  ssh "$LOGIN_HOST" "scancel${cancel_ids}"
+  ssh -n "$LOGIN_HOST" "scancel${cancel_ids}"
 
   remaining_jobs="$(list_remote_jobs)"
   if [[ -z "$remaining_jobs" ]]; then

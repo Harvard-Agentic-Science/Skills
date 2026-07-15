@@ -54,6 +54,31 @@ To allocate three jobs concurrently without opening VS Code windows immediately:
 fasrc new -n 3 --no-open
 ```
 
+## Personal Defaults
+
+Local personal defaults can live in:
+
+```text
+~/.config/fasrc/defaults.env
+```
+
+That file is sourced by `fasrc` before defaults are computed. Command-line flags
+still win. Useful entries include:
+
+```sh
+FASRC_DEFAULT_NEW_COUNT=3
+FASRC_DEFAULT_REMOTE_PATH="my-project"
+FASRC_DEFAULT_TIME=70:00:00
+FASRC_DEFAULT_CPUS=8
+FASRC_DEFAULT_MEM=16G
+FASRC_DEFAULT_PARTITION=shared
+FASRC_DEFAULT_ACCOUNT=my_lab
+```
+
+With `FASRC_DEFAULT_NEW_COUNT=3`, `fasrc new` behaves like `fasrc new -n 3`.
+The plain `fasrc` command still reuses one existing job, and if no job exists it
+allocates one job unless you explicitly run `fasrc new`.
+
 ## What Installation Changes
 
 The installer is idempotent and only manages the FASRC workflow files:
