@@ -26,6 +26,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ```sh
 fasrc status
 fasrc --job JOB_ID
+fasrc open JOB_ID
 fasrc new
 fasrc new -n 3
 fasrc new -n 3 --no-open

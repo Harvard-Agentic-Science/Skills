@@ -116,6 +116,7 @@ Usage:
   fasrc [options] [remote-path]
   fasrc launch [options] [remote-path]
   fasrc resume [options] [remote-path]
+  fasrc open JOB_ID [remote-path]
   fasrc new [options] [remote-path]
   fasrc update [--job JOB_ID | --all | --current]
   fasrc setup [--job JOB_ID | --all | --current]
@@ -128,6 +129,7 @@ Usage:
 Subcommands:
   launch    Default action. Reuse a running job, or allocate one if none exist.
   resume    Same as launch; kept as a readable alias.
+  open      Open a specific running job by job ID.
   new       Force a fresh SLURM allocation, then open it in VS Code.
   update    Check VS Code version, update local extensions, and apply setup.
   setup     Apply the configured VS Code server path and remote extensions.
@@ -171,6 +173,7 @@ Remote path:
 Examples:
   fasrc status
   fasrc --job 12345678
+  fasrc open 12345678
   fasrc --job 12345678 project
   fasrc update --all
   fasrc extensions add ms-python.python ms-toolsai.jupyter
@@ -194,10 +197,11 @@ help_cmd() {
       ;;
     launch|resume|new)
       cat <<'EOF'
-Launch, resume, and new:
+Launch, resume, open, and new:
   fasrc [options] [remote-path]
   fasrc launch [options] [remote-path]
   fasrc resume [options] [remote-path]
+  fasrc open JOB_ID [remote-path]
   fasrc new [options] [remote-path]
 
 Behavior:
@@ -229,7 +233,9 @@ Useful options:
 Examples:
   fasrc
   fasrc --job 12345678
+  fasrc open 12345678
   fasrc --job 12345678 project
+  fasrc open 12345678 project
   fasrc new -n 3 project
   fasrc new -n 3 --no-open
 EOF
@@ -367,11 +373,12 @@ Examples:
 
   # Open a specific live job in VS Code.
   fasrc --job 12345678
+  fasrc open 12345678
 
   # Open the same project path on three live jobs.
-  fasrc --job 12345678 project
-  fasrc --job 12345679 project
-  fasrc --job 12345680 project
+  fasrc open 12345678 project
+  fasrc open 12345679 project
+  fasrc open 12345680 project
 
   # Check VS Code version, update local extensions, and setup live jobs.
   fasrc update
@@ -1743,6 +1750,48 @@ launch_cmd() {
   done 3<<<"$target_entries"
 }
 
+open_cmd() {
+  local requested_job=""
+
+  if (($# == 0)); then
+    launch_cmd
+    return
+  fi
+
+  case "$1" in
+    -h|--help|help)
+      help_cmd launch
+      return
+      ;;
+    --job)
+      [[ $# -ge 2 ]] || die "Missing value for --job"
+      requested_job="$2"
+      shift 2
+      ;;
+    --[0-9]*)
+      requested_job="${1#--}"
+      shift
+      ;;
+    --)
+      shift
+      [[ $# -ge 1 ]] || die "Usage: fasrc open JOB_ID [remote-path]"
+      requested_job="$1"
+      shift
+      ;;
+    [0-9]*)
+      requested_job="$1"
+      shift
+      ;;
+    *)
+      launch_cmd "$@"
+      return
+      ;;
+  esac
+
+  [[ "$requested_job" =~ ^[0-9]+$ ]] || die "Usage: fasrc open JOB_ID [remote-path]"
+  launch_cmd --job "$requested_job" "$@"
+}
+
 bootstrap_cmd() {
   ensure_login_connection
   bootstrap_remote_keys
@@ -1856,6 +1905,10 @@ case "$subcommand" in
   resume)
     shift || true
     launch_cmd "$@"
+    ;;
+  open)
+    shift || true
+    open_cmd "$@"
     ;;
   new)
     shift || true
