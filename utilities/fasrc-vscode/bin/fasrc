@@ -6,6 +6,9 @@ REMOTE_ALIAS="${FASRC_COMPUTE_ALIAS:-fasrc-compute}"
 JOB_NAME="${FASRC_JOB_NAME:-fasrc}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROXY_COMMAND="${FASRC_PROXY_COMMAND:-$SCRIPT_DIR/fasrc-proxy}"
+DEFAULT_TIME="${FASRC_DEFAULT_TIME:-70:00:00}"
+DEFAULT_CPUS="${FASRC_DEFAULT_CPUS:-8}"
+DEFAULT_MEM="${FASRC_DEFAULT_MEM:-16G}"
 LOCAL_PUBKEY="${FASRC_LOCAL_PUBKEY:-$HOME/.ssh/id_ed25519.pub}"
 SSH_INCLUDE="${FASRC_SSH_INCLUDE_FILE:-$HOME/.ssh/fasrc_compute_config}"
 STATE_DIR="${FASRC_STATE_DIR:-$HOME/.local/state/fasrc}"
@@ -62,8 +65,8 @@ Job selection:
 Launch options:
   --new                 Force a new SLURM allocation
   --job JOB_ID          Reuse a specific existing job
-  --time HH:MM:SS       SLURM wall time (default when creating: 08:00:00)
-  --cpus N              CPUs per task (default when creating: 4)
+  --time HH:MM:SS       SLURM wall time (default when creating: 70:00:00)
+  --cpus N              CPUs per task (default when creating: 8)
   --mem SIZE            Memory request, e.g. 16G (default when creating: 16G)
   --partition NAME      SLURM partition
   --account NAME        SLURM account
@@ -85,7 +88,8 @@ Examples:
   fasrc --job 12345678 project
   fasrc update --all
   fasrc extensions add ms-python.python ms-toolsai.jupyter
-  fasrc new --partition shared --cpus 8 --mem 32G --time 12:00:00 project
+  fasrc new project
+  for i in 1 2 3; do fasrc new --no-open; done
   fasrc stop --job 12345678
 
 More detail:
@@ -123,8 +127,8 @@ Behavior:
 Useful options:
   --job JOB_ID          Open one specific running fasrc job.
   --new                 Force a new job.
-  --time HH:MM:SS       Wall time for new jobs. Default: 08:00:00.
-  --cpus N              CPUs per task for new jobs. Default: 4.
+  --time HH:MM:SS       Wall time for new jobs. Default: 70:00:00.
+  --cpus N              CPUs per task for new jobs. Default: 8.
   --mem SIZE            Memory for new jobs. Default: 16G.
   --partition NAME      SLURM partition.
   --account NAME        SLURM account.
@@ -139,7 +143,8 @@ Examples:
   fasrc
   fasrc --job 12345678
   fasrc --job 12345678 project
-  fasrc new --partition shared --cpus 8 --mem 32G --time 12:00:00 project
+  fasrc new project
+  for i in 1 2 3; do fasrc new --no-open; done
 EOF
       ;;
     update|setup|vscode)
@@ -287,8 +292,14 @@ Examples:
   # Add remote extensions to the setup list.
   fasrc extensions add ms-python.python ms-toolsai.jupyter
 
+  # Allocate a new default 70-hour, 8-core, 16G job.
+  fasrc new project
+
+  # Allocate three default jobs without opening VS Code windows.
+  for i in 1 2 3; do fasrc new --no-open; done
+
   # Allocate a new job with explicit resources.
-  fasrc new --partition shared --cpus 8 --mem 32G --time 12:00:00 project
+  fasrc new --partition shared --cpus 12 --mem 32G --time 24:00:00 project
 
   # Pass raw sbatch flags after --.
   fasrc new -- --mail-type=END --mail-user=you@example.edu
@@ -308,6 +319,9 @@ Environment variables:
   FASRC_COMPUTE_ALIAS               Generic compute alias. Default: fasrc-compute
   FASRC_JOB_NAME                    SLURM job name to discover. Default: fasrc
   FASRC_PROXY_COMMAND               Local SSH proxy helper. Default: fasrc-proxy next to fasrc
+  FASRC_DEFAULT_TIME                Default new-job wall time. Default: 70:00:00
+  FASRC_DEFAULT_CPUS                Default new-job CPUs per task. Default: 8
+  FASRC_DEFAULT_MEM                 Default new-job memory. Default: 16G
   FASRC_CONFIG_DIR                  Config directory. Default: ~/.config/fasrc
   FASRC_VSCODE_EXTENSIONS_FILE      Extension list. Default: ~/.config/fasrc/extensions.txt
   FASRC_LOCAL_PUBKEY                Local public key for bootstrap. Default: ~/.ssh/id_ed25519.pub
@@ -1472,9 +1486,9 @@ launch_cmd() {
       probe_compute_alias "$target_alias" || die "Active fasrc job $requested_job exists, but SSH to $target_alias is not responding."
     fi
   elif ((force_new)) || [[ -z "$jobs" ]]; then
-    ((time_set)) || alloc_args+=(--time 08:00:00)
-    ((cpus_set)) || alloc_args+=(--cpus-per-task 4)
-    ((mem_set)) || alloc_args+=(--mem 16G)
+    ((time_set)) || alloc_args+=(--time "$DEFAULT_TIME")
+    ((cpus_set)) || alloc_args+=(--cpus-per-task "$DEFAULT_CPUS")
+    ((mem_set)) || alloc_args+=(--mem "$DEFAULT_MEM")
     target_entry="$(allocate_new_job "${alloc_args[@]}")"
     jobs="$(append_job_entry "$jobs" "$target_entry")"
     allocated_new=1

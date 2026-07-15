@@ -26,11 +26,24 @@ export PATH="$HOME/.local/bin:$PATH"
 ```sh
 fasrc status
 fasrc --job JOB_ID
-fasrc new --partition shared --cpus 8 --mem 32G --time 12:00:00
+fasrc new
+for i in 1 2 3; do fasrc new --no-open; done
 fasrc update
 fasrc setup
 fasrc extensions list
 fasrc help
+```
+
+`fasrc new` defaults to a 70-hour job with 8 CPUs and 16G memory:
+
+```sh
+fasrc new
+```
+
+To allocate three of those jobs without opening VS Code windows immediately:
+
+```sh
+for i in 1 2 3; do fasrc new --no-open; done
 ```
 
 ## What Installation Changes

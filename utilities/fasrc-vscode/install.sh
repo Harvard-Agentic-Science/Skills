@@ -133,11 +133,45 @@ Host $FASRC_ALIAS
   IdentityFile ~/.ssh/id_ed25519
   ControlMaster auto
   ControlPath ~/.ssh/sockets/%r@%h-%p
-  ControlPersist 4h
+  ControlPersist 96h
   ServerAliveInterval 60
   ServerAliveCountMax 3
 EOF
 fi
+
+tmp_file="$(mktemp)"
+awk -v alias="$FASRC_ALIAS" '
+  function finish_host() {
+    if (in_target && !saw_controlpersist) {
+      print "  ControlPersist 96h"
+    }
+  }
+
+  /^[[:space:]]*Host[[:space:]]+/ {
+    finish_host()
+    in_target = 0
+    saw_controlpersist = 0
+    for (i = 2; i <= NF; i++) {
+      if ($i == alias) {
+        in_target = 1
+      }
+    }
+  }
+
+  in_target && tolower($1) == "controlpersist" {
+    print "  ControlPersist 96h"
+    saw_controlpersist = 1
+    next
+  }
+
+  { print }
+
+  END {
+    finish_host()
+  }
+' "$SSH_CONFIG" >"$tmp_file"
+mv "$tmp_file" "$SSH_CONFIG"
+chmod 600 "$SSH_CONFIG"
 
 if [[ ! -f "$HOME/.ssh/id_ed25519" ]]; then
   ssh-keygen -t ed25519 -N '' -f "$HOME/.ssh/id_ed25519" >/dev/null
