@@ -34,7 +34,8 @@ fasrc extensions list
 fasrc help
 ```
 
-`fasrc new` defaults to a 70-hour job with 8 CPUs and 16G memory:
+`fasrc new` defaults to a 70-hour job with 8 CPUs and 16G memory. New job
+wall times are capped at 72 hours by default:
 
 ```sh
 fasrc new
