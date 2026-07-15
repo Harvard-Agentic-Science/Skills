@@ -11,6 +11,16 @@ FASRC_HOST="${FASRC_HOST:-login.rc.fas.harvard.edu}"
 FASRC_ALIAS="${FASRC_ALIAS:-fasrc}"
 FASRC_USER="${FASRC_USER:-}"
 
+require_safe_token() {
+  local name="$1"
+  local value="$2"
+
+  [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    printf '%s must contain only letters, digits, dots, underscores, or hyphens.\n' "$name" >&2
+    exit 1
+  }
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -58,6 +68,15 @@ if [[ -z "$FASRC_USER" ]]; then
     FASRC_USER="$(whoami)"
   fi
 fi
+
+if [[ "$(uname -s)" != "Darwin" && "${FASRC_ALLOW_UNSUPPORTED_PLATFORM:-0}" != "1" ]]; then
+  printf '%s\n' 'This utility supports macOS Remote-SSH compute-node sessions. FASRC documents Remote SSH to compute nodes as macOS-only; use the FASRC Remote Tunnel workflow on Windows or set FASRC_ALLOW_UNSUPPORTED_PLATFORM=1 only if you understand the limitation.' >&2
+  exit 1
+fi
+
+require_safe_token "FASRC username" "$FASRC_USER"
+require_safe_token "FASRC host" "$FASRC_HOST"
+require_safe_token "FASRC alias" "$FASRC_ALIAS"
 
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$HOME/.ssh" "$HOME/.ssh/sockets"
 chmod 700 "$HOME/.ssh" "$HOME/.ssh/sockets"

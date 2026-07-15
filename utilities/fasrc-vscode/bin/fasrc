@@ -11,7 +11,7 @@ fi
 
 LOGIN_HOST="${FASRC_LOGIN_HOST:-fasrc}"
 REMOTE_ALIAS="${FASRC_COMPUTE_ALIAS:-fasrc-compute}"
-JOB_NAME="${FASRC_JOB_NAME:-fasrc}"
+JOB_NAME="${FASRC_JOB_NAME:-fasrc-vscode}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROXY_COMMAND="${FASRC_PROXY_COMMAND:-$SCRIPT_DIR/fasrc-proxy}"
 DEFAULT_TIME="${FASRC_DEFAULT_TIME:-70:00:00}"
@@ -19,7 +19,7 @@ DEFAULT_CPUS="${FASRC_DEFAULT_CPUS:-8}"
 DEFAULT_MEM="${FASRC_DEFAULT_MEM:-16G}"
 DEFAULT_NEW_COUNT="${FASRC_DEFAULT_NEW_COUNT:-1}"
 DEFAULT_REMOTE_PATH="${FASRC_DEFAULT_REMOTE_PATH:-}"
-DEFAULT_PARTITION="${FASRC_DEFAULT_PARTITION:-}"
+DEFAULT_PARTITION="${FASRC_DEFAULT_PARTITION:-shared}"
 DEFAULT_ACCOUNT="${FASRC_DEFAULT_ACCOUNT:-}"
 DEFAULT_CONSTRAINT="${FASRC_DEFAULT_CONSTRAINT:-}"
 DEFAULT_GRES="${FASRC_DEFAULT_GRES:-}"
@@ -109,6 +109,13 @@ require_positive_integer() {
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive integer."
 }
 
+require_submit_interval() {
+  local value="$1"
+
+  [[ "$value" =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die "FASRC_SUBMIT_INTERVAL must be a number of seconds."
+  awk -v value="$value" 'BEGIN { exit !(value >= 0.5) }' || die "FASRC_SUBMIT_INTERVAL must be at least 0.5 seconds to respect FASRC scheduler guidance."
+}
+
 usage() {
   cat <<'EOF'
 fasrc opens VS Code on FASRC SLURM compute nodes.
@@ -140,14 +147,14 @@ Subcommands:
             Manage the extension ID list used by setup/update.
   paths     List or edit local remote-path aliases.
   login     Establish or check the cached FASRC SSH login.
-  status    List running fasrc jobs and refresh local SSH aliases.
-  stop      Cancel the preferred fasrc job, a specific job, or all of them.
+  status    List running fasrc-vscode jobs and refresh local SSH aliases.
+  stop      Cancel the preferred fasrc-vscode job, a specific job, or all of them.
   bootstrap Ensure local and cluster SSH public keys are in authorized_keys.
   help      Show this help. Topics: launch, update, extensions, paths, login,
             status, stop, bootstrap, examples, env.
 
 Job selection:
-  - Jobs are discovered by SLURM job name fasrc.
+  - Jobs are discovered by SLURM job name fasrc-vscode.
   - Existing jobs are reused by default.
   - The saved preferred job is reused first; otherwise the highest job ID is used.
   - Use --job JOB_ID to open a specific running job.
@@ -156,7 +163,7 @@ Job selection:
 
 Launch options:
   --new                 Force a new SLURM allocation
-  -n, --count N         Allocate N new jobs in parallel
+  -n, --count N         Allocate N new jobs, submitted one second apart.
   --job JOB_ID          Reuse a specific existing job
   --time HH:MM:SS       SLURM wall time (default: 70:00:00; max: 72:00:00)
   --cpus N              CPUs per task (default when creating: 8)
@@ -211,9 +218,9 @@ Launch, resume, open, and new:
   fasrc new [options] [remote-path]
 
 Behavior:
-  - launch/resume/default reuse an existing running fasrc job when possible.
+  - launch/resume/default reuse an existing running fasrc-vscode job when possible.
   - new, --new, or any allocation option forces a fresh SLURM job.
-  - If no running fasrc jobs exist, launch allocates a new one.
+  - If no running fasrc-vscode jobs exist, launch allocates a new one.
   - The script opens a new VS Code window unless FASRC_REUSE_WINDOW=1.
   - Before opening VS Code, it refreshes ~/.ssh/fasrc_compute_config and VS Code
     Remote-SSH settings for the target compute alias.
@@ -221,9 +228,9 @@ Behavior:
     REMOTE_HOME/.vscode-server-fasrc
 
 Useful options:
-  --job JOB_ID          Open one specific running fasrc job.
+  --job JOB_ID          Open one specific running fasrc-vscode job.
   --new                 Force a new job.
-  -n, --count N         Allocate N new jobs in parallel.
+  -n, --count N         Allocate N new jobs, submitted one second apart.
   --time HH:MM:SS       Wall time for new jobs. Default: 70:00:00. Max: 72:00:00.
   --cpus N              CPUs per task for new jobs. Default: 8.
   --mem SIZE            Memory for new jobs. Default: 16G.
@@ -265,7 +272,7 @@ What setup does:
   - Also runs the local extension update unless --no-local-update is used.
 
 Job selection:
-  --all                 Apply to all running fasrc jobs. This is default.
+  --all                 Apply to all running fasrc-vscode jobs. This is default.
   --job JOB_ID          Apply to one running job.
   --current             Apply only to the saved/current preferred job.
   --local-only          Only check/update local VS Code; do not touch FASRC.
@@ -379,9 +386,9 @@ Stop:
   fasrc stop --all
 
 Behavior:
-  - stop cancels the current preferred fasrc job.
-  - stop --job JOB_ID cancels that specific running fasrc job.
-  - stop --all cancels all running fasrc jobs.
+  - stop cancels the current preferred fasrc-vscode job.
+  - stop --job JOB_ID cancels that specific running fasrc-vscode job.
+  - stop --all cancels all running fasrc-vscode jobs.
   - After cancellation, local SSH aliases are refreshed for any jobs still running.
 
 Examples:
@@ -409,7 +416,7 @@ EOF
     examples|example)
       cat <<'EOF'
 Examples:
-  # List live fasrc jobs and refresh aliases.
+  # List live fasrc-vscode jobs and refresh aliases.
   fasrc status
 
   # Open the preferred live job in VS Code.
@@ -445,7 +452,7 @@ Examples:
   # Refresh SSH config and VS Code settings without opening a window.
   fasrc --job 12345678 --no-open
 
-  # Cancel one live job, or all live fasrc jobs.
+  # Cancel one live job, or all live fasrc-vscode jobs.
   fasrc stop --job 12345678
   fasrc stop --all
 EOF
@@ -456,7 +463,7 @@ Environment variables:
   FASRC_DEFAULTS_FILE               Personal defaults file. Default: ~/.config/fasrc/defaults.env
   FASRC_LOGIN_HOST                  SSH host for the login node. Default: fasrc
   FASRC_COMPUTE_ALIAS               Generic compute alias. Default: fasrc-compute
-  FASRC_JOB_NAME                    SLURM job name to discover. Default: fasrc
+  FASRC_JOB_NAME                    SLURM job name to discover. Default: fasrc-vscode
   FASRC_PROXY_COMMAND               Local SSH proxy helper. Default: fasrc-proxy next to fasrc
   FASRC_DEFAULT_TIME                Default new-job wall time. Default: 70:00:00
   FASRC_DEFAULT_CPUS                Default new-job CPUs per task. Default: 8
@@ -464,7 +471,7 @@ Environment variables:
   FASRC_DEFAULT_NEW_COUNT           Default count for fasrc new/--new. Default: 1
   FASRC_DEFAULT_REMOTE_PATH         Remote path to open when no path is supplied.
   FASRC_PATH_ALIASES_FILE           Local path alias file. Default: ~/.config/fasrc/paths.env
-  FASRC_DEFAULT_PARTITION           Default SLURM partition for new jobs.
+  FASRC_DEFAULT_PARTITION           Default SLURM partition for new jobs. Default: shared
   FASRC_DEFAULT_ACCOUNT             Default SLURM account for new jobs.
   FASRC_DEFAULT_CONSTRAINT          Default SLURM constraint for new jobs.
   FASRC_DEFAULT_GRES                Default SLURM gres request for new jobs.
@@ -487,7 +494,8 @@ Timeouts:
   FASRC_SSH_READY_INTERVAL
   FASRC_LOGIN_TIMEOUT
   FASRC_LOGIN_CONNECT_TIMEOUT
-  FASRC_POLL_SECONDS                Remote allocator poll interval while waiting on SLURM.
+  FASRC_POLL_SECONDS                Remote allocator poll interval while waiting on SLURM. Default: 60 seconds.
+  FASRC_SUBMIT_INTERVAL             Delay between sbatch submissions. Default: 1 second.
 
 Files managed:
   ~/.ssh/fasrc_compute_config       Local SSH aliases for live jobs.
@@ -522,6 +530,7 @@ SSH_READY_TIMEOUT="${FASRC_SSH_READY_TIMEOUT:-90}"
 SSH_READY_INTERVAL="${FASRC_SSH_READY_INTERVAL:-3}"
 SSH_LOGIN_TIMEOUT="${FASRC_LOGIN_TIMEOUT:-120}"
 SSH_LOGIN_CONNECT_TIMEOUT="${FASRC_LOGIN_CONNECT_TIMEOUT:-20}"
+SUBMIT_INTERVAL="${FASRC_SUBMIT_INTERVAL:-1}"
 
 job_alias() {
   printf '%s-%s\n' "$REMOTE_ALIAS" "$1"
@@ -1070,8 +1079,8 @@ install_remote_allocator() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-poll_seconds="${FASRC_POLL_SECONDS:-5}"
-job_name="${FASRC_JOB_NAME:-fasrc}"
+poll_seconds="${FASRC_POLL_SECONDS:-60}"
+job_name="${FASRC_JOB_NAME:-fasrc-vscode}"
 
 job_id="$(sbatch --parsable --job-name="$job_name" "$@" --wrap='sleep infinity')"
 
@@ -1138,7 +1147,7 @@ remote_user="$1"
 job_name="$2"
 
 squeue -u "$remote_user" -h -o '%A|%T|%N|%j' | awk -F'|' -v job_name="$job_name" '
-  $4 == job_name && $2 == "RUNNING" && $3 != "(null)" && $3 != "n/a" {
+  $1 ~ /^[0-9]+$/ && $4 == job_name && $2 == "RUNNING" && $3 ~ /^[A-Za-z0-9._-]+$/ {
     print $1 "|" $3
   }
 '
@@ -1179,6 +1188,10 @@ allocate_new_jobs() {
   local i pid entry entries=""
   local allocation_failed=0
 
+  if ((count > 1)); then
+    require_submit_interval "$SUBMIT_INTERVAL"
+  fi
+
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/fasrc-alloc.XXXXXX")"
   pids_file="$tmp_dir/pids"
 
@@ -1187,6 +1200,9 @@ allocate_new_jobs() {
     allocate_new_job "$@" >"$tmp_dir/$i.out" 2>"$tmp_dir/$i.err" &
     pid="$!"
     printf '%s %s\n' "$pid" "$i" >>"$pids_file"
+    if ((i < count)); then
+      sleep "$SUBMIT_INTERVAL"
+    fi
     i=$((i + 1))
   done
 
@@ -1650,7 +1666,7 @@ setup_vscode_cmd() {
   write_compute_include "$jobs" "$current_job"
 
   if [[ -n "$requested_job" ]]; then
-    selected_jobs="$(find_job_entry "$jobs" "$requested_job")" || die "Active fasrc job $requested_job was not found."
+    selected_jobs="$(find_job_entry "$jobs" "$requested_job")" || die "Active $JOB_NAME job $requested_job was not found."
   elif ((apply_current)); then
     selected_jobs="$target_entry"
   elif ((apply_all)); then
@@ -1840,12 +1856,12 @@ launch_cmd() {
   fi
 
   if [[ -n "$requested_job" ]]; then
-    target_entry="$(find_job_entry "$jobs" "$requested_job")" || die "Active fasrc job $requested_job was not found."
+    target_entry="$(find_job_entry "$jobs" "$requested_job")" || die "Active $JOB_NAME job $requested_job was not found."
     target_entries="$target_entry"
     target_alias="$(job_alias "$requested_job")"
     if ! probe_compute_alias "$target_alias"; then
       reset_login_connection
-      probe_compute_alias "$target_alias" || die "Active fasrc job $requested_job exists, but SSH to $target_alias is not responding."
+      probe_compute_alias "$target_alias" || die "Active $JOB_NAME job $requested_job exists, but SSH to $target_alias is not responding."
     fi
   elif ((force_new)) || [[ -z "$jobs" ]]; then
     if ((time_set)); then
@@ -1863,7 +1879,7 @@ launch_cmd() {
     ((qos_set)) || [[ -z "$DEFAULT_QOS" ]] || alloc_args+=(--qos "$DEFAULT_QOS")
     ((reservation_set)) || [[ -z "$DEFAULT_RESERVATION" ]] || alloc_args+=(--reservation "$DEFAULT_RESERVATION")
     if ((count > 1)); then
-      printf 'Allocating %s new jobs in parallel...\n' "$count" >&2
+      printf 'Submitting %s new jobs one second apart...\n' "$count" >&2
     fi
     target_entries="$(allocate_new_jobs "$count" "${alloc_args[@]}")" || die "Could not allocate requested job(s). Run 'fasrc status' to refresh any jobs that did start."
     while IFS= read -r target_entry; do
@@ -1874,13 +1890,13 @@ launch_cmd() {
     [[ -n "$target_entry" ]] || die "Allocator returned no job information."
     allocated_new=1
   else
-    target_entry="$(choose_default_entry "$jobs")" || die "No active fasrc job was found."
+    target_entry="$(choose_default_entry "$jobs")" || die "No active $JOB_NAME job was found."
     target_entries="$target_entry"
     target_job="${target_entry%%|*}"
     target_alias="$(job_alias "$target_job")"
     if ! probe_compute_alias "$target_alias"; then
       reset_login_connection
-      probe_compute_alias "$target_alias" || die "Default fasrc job $target_job exists, but SSH to $target_alias is not responding. Use 'fasrc new ...' for a new job or 'fasrc --job JOB_ID' for a specific other job."
+      probe_compute_alias "$target_alias" || die "Default $JOB_NAME job $target_job exists, but SSH to $target_alias is not responding. Use 'fasrc new ...' for a new job or 'fasrc --job JOB_ID' for a specific other job."
     fi
   fi
 
@@ -2058,7 +2074,7 @@ stop_cmd() {
     done <<<"$jobs"
   else
     if [[ -n "$requested_job" ]]; then
-      target_entry="$(find_job_entry "$jobs" "$requested_job")" || die "Active fasrc job $requested_job was not found."
+      target_entry="$(find_job_entry "$jobs" "$requested_job")" || die "Active $JOB_NAME job $requested_job was not found."
     else
       target_entry="$(choose_default_entry "$jobs")"
     fi

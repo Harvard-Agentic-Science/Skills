@@ -3,6 +3,19 @@
 This package installs a `fasrc` command for opening VS Code on live FASRC SLURM
 compute jobs and applying a shared VS Code workflow.
 
+## Who This Is For
+
+This is a macOS workflow for FASRC users who want VS Code Remote-SSH windows on
+allocated Cannon compute nodes. FASRC documents direct Remote-SSH compute-node
+connections as macOS-only; Windows users should use the
+[FASRC Remote Tunnel workflow](https://docs.rc.fas.harvard.edu/kb/vscode-remote-development-via-ssh-or-tunnel/)
+instead. The utility is not for FASSE compute nodes, where FASRC does not permit
+this Remote-SSH allocation pattern.
+
+FASRC recommends its Remote Tunnel batch workflow for maximum resilience to
+network interruptions. Use this utility when direct macOS Remote-SSH sessions,
+including multiple independent windows, fit your workflow.
+
 ## Install
 
 Prerequisites:
@@ -19,6 +32,50 @@ Then open a new terminal, or run:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
+```
+
+## First Run
+
+This is the complete first-use workflow. Run these commands in a Terminal on
+your own Mac, not in an agent sandbox:
+
+```sh
+# Establish the FASRC password/2FA session that VS Code will reuse.
+fasrc login
+
+# Apply local VS Code settings and inspect any existing fasrc-vscode jobs.
+fasrc setup --local-only --no-local-update
+fasrc status
+
+# Allocate one 70-hour shared-partition session with 8 CPUs and 16G, then open it.
+fasrc new
+```
+
+The first remote connection installs the VS Code server and extensions under
+your FASRC home directory, so it can take longer than later connections.
+
+## Three-Window Demo
+
+For three independent compute sessions, allocate them without trying to control
+the desktop from a script or agent:
+
+```sh
+fasrc new -n 3 --no-open
+fasrc status
+```
+
+Copy the three job IDs printed by `fasrc status`, then open one folder per job:
+
+```sh
+fasrc open JOB_ID_1 project-a
+fasrc open JOB_ID_2 project-b
+fasrc open JOB_ID_3 project-c
+```
+
+When you are done, cancel only these utility-managed jobs:
+
+```sh
+fasrc stop --all
 ```
 
 ## Commands
@@ -38,14 +95,15 @@ fasrc login
 fasrc help
 ```
 
-`fasrc new` defaults to a 70-hour job with 8 CPUs and 16G memory. New job
-wall times are capped at 72 hours by default:
+`fasrc new` defaults to a 70-hour job with 8 CPUs and 16G memory on FASRC's
+`shared` partition. New job wall times are capped at 72 hours by default:
 
 ```sh
 fasrc new
 ```
 
-To allocate three of those jobs concurrently and open three VS Code windows:
+To submit three jobs one second apart, respecting FASRC scheduler guidance, and
+then request three VS Code windows:
 
 ```sh
 fasrc new -n 3
@@ -95,11 +153,24 @@ FASRC_DEFAULT_CPUS=8
 FASRC_DEFAULT_MEM=16G
 FASRC_DEFAULT_PARTITION=shared
 FASRC_DEFAULT_ACCOUNT=my_lab
+FASRC_SUBMIT_INTERVAL=1
 ```
+
+For multi-job launches, `FASRC_SUBMIT_INTERVAL` must be at least `0.5` seconds.
 
 With `FASRC_DEFAULT_NEW_COUNT=3`, `fasrc new` behaves like `fasrc new -n 3`.
 The plain `fasrc` command still reuses one existing job, and if no job exists it
 allocates one job unless you explicitly run `fasrc new`.
+
+`shared` is the default because a Remote-SSH session is disrupted when a job is
+requeued. FASRC notes in its
+[cluster responsibilities guidance](https://docs.rc.fas.harvard.edu/kb/responsibilities/)
+that `serial_requeue` can be more available, but jobs there may be stopped and
+restarted; use it only for work that handles requeue safely:
+
+```sh
+FASRC_DEFAULT_PARTITION=serial_requeue
+```
 
 ## Path Aliases
 
@@ -156,6 +227,10 @@ The installer is idempotent and only manages the FASRC workflow files:
 `fasrc setup` also updates VS Code user `settings.json` with Remote-SSH,
 extension, and LaTeX Workshop defaults.
 
+On the FASRC login host, the utility also maintains
+`~/.local/bin/fasrc-alloc`, a small helper used to submit and wait for the
+utility's SLURM jobs.
+
 ## VS Code Setup
 
 The default extension list is in:
@@ -211,11 +286,22 @@ and one remote extension setup can be reused by multiple live compute jobs.
 That is the part that avoids repeatedly downloading the VS Code server and
 extensions into per-node `/tmp`.
 
-## TODO
+## Troubleshooting
 
-- Investigate the delay between `Allocated new job ...` and the VS Code window
-  becoming usable. This likely needs live FASRC trial and error, so it is
-  intentionally not part of the current parallel allocation change.
+- VS Code asks for your password again: run `fasrc login`, confirm
+  `ssh -O check fasrc` reports `Master running`, then reconnect.
+- A new job is running but VS Code cannot connect: run `fasrc status` to refresh
+  aliases, then use `fasrc open JOB_ID PATH` from your local Terminal.
+- An agent says it opened a window but no window appears: paste the reported
+  `fasrc open` command into your own Terminal. Agent shells may not own the
+  macOS desktop session.
+- A connection fails after a network change: run `fasrc login` again, then
+  retry the `fasrc open` command.
+- The first connection is slow: wait for the remote VS Code server and
+  extensions to install. Later sessions reuse the persistent server path.
+- FASRC job allocation is pending: this reflects the scheduler queue. Avoid
+  repeatedly running `fasrc status`; FASRC asks users not to poll scheduler
+  commands more often than once per minute.
 
 ## Username Handling
 
@@ -246,6 +332,7 @@ After installing:
 command -v fasrc
 fasrc extensions list
 fasrc setup --local-only --no-local-update
+bash tests/smoke.sh
 ```
 
 Only `fasrc` should be a public command. Old prerelease names such as
@@ -257,6 +344,12 @@ To remove the installed command files:
 
 ```sh
 rm -f ~/.local/bin/fasrc ~/.local/bin/fasrc-proxy
+```
+
+Optionally remove the remote allocator after closing all `fasrc-vscode` jobs:
+
+```sh
+ssh fasrc 'rm -f ~/.local/bin/fasrc-alloc'
 ```
 
 Then remove the FASRC include line and generated `Host fasrc` block from

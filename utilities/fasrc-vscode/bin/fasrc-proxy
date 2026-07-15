@@ -3,7 +3,7 @@ set -euo pipefail
 
 LOGIN_HOST="${FASRC_LOGIN_HOST:-fasrc}"
 REMOTE_ALIAS="${FASRC_COMPUTE_ALIAS:-fasrc-compute}"
-JOB_NAME="${FASRC_JOB_NAME:-fasrc}"
+JOB_NAME="${FASRC_JOB_NAME:-fasrc-vscode}"
 STATE_DIR="${FASRC_STATE_DIR:-$HOME/.local/state/fasrc}"
 STATE_FILE="$STATE_DIR/current.env"
 PROBE_TIMEOUT="${FASRC_PROXY_PROBE_TIMEOUT:-25}"
@@ -154,7 +154,7 @@ remote_user="$1"
 job_name="$2"
 
 squeue -u "$remote_user" -h -o '%A|%T|%N|%j' | awk -F'|' -v job_name="$job_name" '
-  $4 == job_name && $2 == "RUNNING" && $3 != "(null)" && $3 != "n/a" {
+  $1 ~ /^[0-9]+$/ && $4 == job_name && $2 == "RUNNING" && $3 ~ /^[A-Za-z0-9._-]+$/ {
     print $1 "|" $3
   }
 '
