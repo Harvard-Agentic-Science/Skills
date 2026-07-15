@@ -27,7 +27,8 @@ export PATH="$HOME/.local/bin:$PATH"
 fasrc status
 fasrc --job JOB_ID
 fasrc new
-for i in 1 2 3; do fasrc new --no-open; done
+fasrc new -n 3
+fasrc new -n 3 --no-open
 fasrc update
 fasrc setup
 fasrc extensions list
@@ -41,10 +42,16 @@ wall times are capped at 72 hours by default:
 fasrc new
 ```
 
-To allocate three of those jobs without opening VS Code windows immediately:
+To allocate three of those jobs concurrently and open three VS Code windows:
 
 ```sh
-for i in 1 2 3; do fasrc new --no-open; done
+fasrc new -n 3
+```
+
+To allocate three jobs concurrently without opening VS Code windows immediately:
+
+```sh
+fasrc new -n 3 --no-open
 ```
 
 ## What Installation Changes
@@ -116,6 +123,12 @@ FASRC home directories are shared across compute nodes, so one VS Code server
 and one remote extension setup can be reused by multiple live compute jobs.
 That is the part that avoids repeatedly downloading the VS Code server and
 extensions into per-node `/tmp`.
+
+## TODO
+
+- Investigate the delay between `Allocated new job ...` and the VS Code window
+  becoming usable. This likely needs live FASRC trial and error, so it is
+  intentionally not part of the current parallel allocation change.
 
 ## Username Handling
 

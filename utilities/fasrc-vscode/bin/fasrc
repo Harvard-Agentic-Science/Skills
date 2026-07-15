@@ -87,6 +87,13 @@ require_slurm_time_within_limit() {
   ((seconds <= max_seconds)) || die "SLURM time $value exceeds the configured max of $MAX_SLURM_TIME."
 }
 
+require_positive_integer() {
+  local name="$1"
+  local value="$2"
+
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive integer."
+}
+
 usage() {
   cat <<'EOF'
 fasrc opens VS Code on FASRC SLURM compute nodes.
@@ -128,6 +135,7 @@ Job selection:
 
 Launch options:
   --new                 Force a new SLURM allocation
+  -n, --count N         Allocate N new jobs in parallel
   --job JOB_ID          Reuse a specific existing job
   --time HH:MM:SS       SLURM wall time (default: 70:00:00; max: 72:00:00)
   --cpus N              CPUs per task (default when creating: 8)
@@ -153,7 +161,7 @@ Examples:
   fasrc update --all
   fasrc extensions add ms-python.python ms-toolsai.jupyter
   fasrc new project
-  for i in 1 2 3; do fasrc new --no-open; done
+  fasrc new -n 3 project
   fasrc stop --job 12345678
 
 More detail:
@@ -191,6 +199,7 @@ Behavior:
 Useful options:
   --job JOB_ID          Open one specific running fasrc job.
   --new                 Force a new job.
+  -n, --count N         Allocate N new jobs in parallel.
   --time HH:MM:SS       Wall time for new jobs. Default: 70:00:00. Max: 72:00:00.
   --cpus N              CPUs per task for new jobs. Default: 8.
   --mem SIZE            Memory for new jobs. Default: 16G.
@@ -207,8 +216,8 @@ Examples:
   fasrc
   fasrc --job 12345678
   fasrc --job 12345678 project
-  fasrc new project
-  for i in 1 2 3; do fasrc new --no-open; done
+  fasrc new -n 3 project
+  fasrc new -n 3 --no-open
 EOF
       ;;
     update|setup|vscode)
@@ -359,8 +368,8 @@ Examples:
   # Allocate a new default 70-hour, 8-core, 16G job.
   fasrc new project
 
-  # Allocate three default jobs without opening VS Code windows.
-  for i in 1 2 3; do fasrc new --no-open; done
+  # Allocate three default jobs concurrently without opening VS Code windows.
+  fasrc new -n 3 --no-open
 
   # Allocate a new job with explicit resources.
   fasrc new --partition shared --cpus 12 --mem 32G --time 24:00:00 project
@@ -1086,6 +1095,49 @@ append_job_entry() {
   printf '%s\n%s\n' "$jobs" "$entry"
 }
 
+allocate_new_jobs() {
+  local count="$1"
+  shift
+
+  local tmp_dir pids_file
+  local i pid entry entries=""
+  local allocation_failed=0
+
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/fasrc-alloc.XXXXXX")"
+  pids_file="$tmp_dir/pids"
+
+  i=1
+  while ((i <= count)); do
+    allocate_new_job "$@" >"$tmp_dir/$i.out" 2>"$tmp_dir/$i.err" &
+    pid="$!"
+    printf '%s %s\n' "$pid" "$i" >>"$pids_file"
+    i=$((i + 1))
+  done
+
+  while read -r pid i; do
+    if ! wait "$pid"; then
+      allocation_failed=1
+      printf 'Allocation %s failed.\n' "$i" >&2
+      sed -n '1,120p' "$tmp_dir/$i.err" >&2
+      continue
+    fi
+
+    entry="$(sed -n '1p' "$tmp_dir/$i.out")"
+    if [[ -z "$entry" ]]; then
+      allocation_failed=1
+      printf 'Allocation %s returned no job information.\n' "$i" >&2
+      continue
+    fi
+
+    entries="$(append_job_entry "$entries" "$entry")"
+  done <"$pids_file"
+
+  rm -rf "$tmp_dir"
+
+  ((allocation_failed == 0)) || return 1
+  printf '%s\n' "$entries"
+}
+
 build_remote_uri() {
   local alias="$1"
   local remote_home_path="$2"
@@ -1464,17 +1516,26 @@ launch_cmd() {
   local force_new=0
   local allocated_new=0
   local requested_job=""
+  local requested_time=""
+  local count=1
   local time_set=0
   local cpus_set=0
   local mem_set=0
   local -a alloc_args=()
-  local jobs="" target_entry="" target_job="" target_alias="" home_path="" install_root="" uri=""
+  local jobs="" target_entry="" target_entries="" target_job="" target_alias="" home_path="" install_root="" uri=""
 
   while (($#)); do
     case "$1" in
       --new)
         force_new=1
         shift
+        ;;
+      -n|--count)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        require_positive_integer "count" "$2"
+        count="$2"
+        force_new=1
+        shift 2
         ;;
       --job)
         [[ $# -ge 2 ]] || die "Missing value for --job"
@@ -1555,6 +1616,7 @@ launch_cmd() {
 
   if [[ -n "$requested_job" ]]; then
     target_entry="$(find_job_entry "$jobs" "$requested_job")" || die "Active fasrc job $requested_job was not found."
+    target_entries="$target_entry"
     target_alias="$(job_alias "$requested_job")"
     if ! probe_compute_alias "$target_alias"; then
       reset_login_connection
@@ -1569,11 +1631,20 @@ launch_cmd() {
     ((time_set)) || alloc_args+=(--time "$DEFAULT_TIME")
     ((cpus_set)) || alloc_args+=(--cpus-per-task "$DEFAULT_CPUS")
     ((mem_set)) || alloc_args+=(--mem "$DEFAULT_MEM")
-    target_entry="$(allocate_new_job "${alloc_args[@]}")"
-    jobs="$(append_job_entry "$jobs" "$target_entry")"
+    if ((count > 1)); then
+      printf 'Allocating %s new jobs in parallel...\n' "$count" >&2
+    fi
+    target_entries="$(allocate_new_jobs "$count" "${alloc_args[@]}")" || die "Could not allocate requested job(s). Run 'fasrc status' to refresh any jobs that did start."
+    while IFS= read -r target_entry; do
+      [[ -n "$target_entry" ]] || continue
+      jobs="$(append_job_entry "$jobs" "$target_entry")"
+    done <<<"$target_entries"
+    target_entry="$(printf '%s\n' "$target_entries" | sed -n '1p')"
+    [[ -n "$target_entry" ]] || die "Allocator returned no job information."
     allocated_new=1
   else
     target_entry="$(choose_default_entry "$jobs")" || die "No active fasrc job was found."
+    target_entries="$target_entry"
     target_job="${target_entry%%|*}"
     target_alias="$(job_alias "$target_job")"
     if ! probe_compute_alias "$target_alias"; then
@@ -1584,31 +1655,38 @@ launch_cmd() {
 
   refresh_local_config "$jobs" "$target_entry"
 
-  target_job="${target_entry%%|*}"
-  target_alias="$(job_alias "$target_job")"
-
-  if ((allocated_new)); then
-    printf 'Allocated new job %s via alias %s.\n' "$target_job" "$target_alias" >&2
-    wait_for_compute_alias "$target_alias" || die "Allocated job $target_job, but SSH to $target_alias did not become ready within ${SSH_READY_TIMEOUT}s."
-  else
-    printf 'Reusing job %s via alias %s.\n' "$target_job" "$target_alias" >&2
-  fi
-
   home_path="$(remote_home)"
   install_root="$(vscode_server_install_root "$home_path")"
-  ensure_vscode_remote_settings "$target_alias" "$install_root"
+
+  while IFS='|' read -r target_job _node; do
+    [[ -n "$target_job" ]] || continue
+    target_alias="$(job_alias "$target_job")"
+
+    if ((allocated_new)); then
+      printf 'Allocated new job %s via alias %s.\n' "$target_job" "$target_alias" >&2
+      wait_for_compute_alias "$target_alias" || die "Allocated job $target_job, but SSH to $target_alias did not become ready within ${SSH_READY_TIMEOUT}s."
+    else
+      printf 'Reusing job %s via alias %s.\n' "$target_job" "$target_alias" >&2
+    fi
+
+    ensure_vscode_remote_settings "$target_alias" "$install_root"
+  done <<<"$target_entries"
 
   if ((no_open)); then
     return
   fi
 
-  uri="$(build_remote_uri "$target_alias" "$home_path" "$open_path")"
   prepare_code_cli_limits
-  if [[ "${FASRC_REUSE_WINDOW:-0}" == "1" ]]; then
-    code --folder-uri "$uri"
-  else
-    code --new-window --folder-uri "$uri"
-  fi
+  while IFS='|' read -r target_job _node; do
+    [[ -n "$target_job" ]] || continue
+    target_alias="$(job_alias "$target_job")"
+    uri="$(build_remote_uri "$target_alias" "$home_path" "$open_path")"
+    if [[ "${FASRC_REUSE_WINDOW:-0}" == "1" ]]; then
+      code --folder-uri "$uri"
+    else
+      code --new-window --folder-uri "$uri"
+    fi
+  done <<<"$target_entries"
 }
 
 bootstrap_cmd() {
