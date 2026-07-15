@@ -11,6 +11,10 @@ The utility configures Remote-SSH aliases, a persistent VS Code server path,
 default remote extensions, and LaTeX Workshop defaults for PDF rendering and
 SyncTeX navigation.
 
+When opening VS Code is requested, the agent must distinguish scheduler/SSH
+setup from macOS GUI control. It should provide the user with exact `fasrc open`
+commands when it cannot verify visible windows on the user's desktop.
+
 ## How to use it
 
 Copy `fasrc-vscode-setup.md` to `.claude/agents/` in your project, then say:

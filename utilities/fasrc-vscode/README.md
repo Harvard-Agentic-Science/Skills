@@ -57,6 +57,25 @@ To allocate three jobs concurrently without opening VS Code windows immediately:
 fasrc new -n 3 --no-open
 ```
 
+## Opening VS Code From An Agent
+
+`fasrc open JOB_ID [remote-path]` launches the local VS Code application. Run
+that command in a Terminal on the Mac whose desktop should receive the window.
+
+An AI coding agent can allocate jobs, refresh SSH aliases, and run the command,
+but its command environment may not own the user's macOS GUI session. An exit
+code from `fasrc open` is therefore not proof that a visible VS Code window was
+created. When an agent cannot inspect or control the desktop, it should give the
+user the exact commands to paste into their own Terminal, for example:
+
+```sh
+fasrc open 12345678 project-a
+fasrc open 12345679 project-b
+```
+
+The agent should report those commands as launched only after the user confirms
+the windows appeared.
+
 ## Personal Defaults
 
 Local personal defaults can live in:
