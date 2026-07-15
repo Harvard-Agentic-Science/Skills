@@ -3,6 +3,7 @@ set -euo pipefail
 
 CONFIG_DIR="${FASRC_CONFIG_DIR:-$HOME/.config/fasrc}"
 DEFAULTS_FILE="${FASRC_DEFAULTS_FILE:-$CONFIG_DIR/defaults.env}"
+PATH_ALIASES_FILE="${FASRC_PATH_ALIASES_FILE:-$CONFIG_DIR/paths.env}"
 if [[ -f "$DEFAULTS_FILE" ]]; then
   # shellcheck disable=SC1090
   source "$DEFAULTS_FILE"
@@ -121,6 +122,7 @@ Usage:
   fasrc update [--job JOB_ID | --all | --current]
   fasrc setup [--job JOB_ID | --all | --current]
   fasrc extensions [list|add|path|edit]
+  fasrc paths [list|path|edit]
   fasrc bootstrap
   fasrc status
   fasrc stop [--job JOB_ID | --all]
@@ -135,10 +137,11 @@ Subcommands:
   setup     Apply the configured VS Code server path and remote extensions.
   extensions
             Manage the extension ID list used by setup/update.
+  paths     List or edit local remote-path aliases.
   status    List running fasrc jobs and refresh local SSH aliases.
   stop      Cancel the preferred fasrc job, a specific job, or all of them.
   bootstrap Ensure local and cluster SSH public keys are in authorized_keys.
-  help      Show this help. Topics: launch, update, extensions, status, stop,
+  help      Show this help. Topics: launch, update, extensions, paths, status, stop,
             bootstrap, examples, env.
 
 Job selection:
@@ -177,6 +180,7 @@ Examples:
   fasrc --job 12345678 project
   fasrc update --all
   fasrc extensions add ms-python.python ms-toolsai.jupyter
+  fasrc paths
   fasrc new project
   fasrc new -n 3 project
   fasrc stop --job 12345678
@@ -300,6 +304,26 @@ Examples:
   fasrc extensions list
 EOF
       ;;
+    paths|path-aliases|aliases)
+      cat <<'EOF'
+Paths:
+  fasrc paths
+  fasrc paths list
+  fasrc paths path
+  fasrc paths edit
+
+Path aliases are local shortcuts for remote folders. They live in:
+  ~/.config/fasrc/paths.env
+
+Format:
+  name=/remote/path
+
+Examples:
+  fasrc open 12345678 warped
+  fasrc new -n 3 embed
+  fasrc open 12345678 warped/subdir
+EOF
+      ;;
     status|jobs|query)
       cat <<'EOF'
 Status:
@@ -419,6 +443,7 @@ Environment variables:
   FASRC_DEFAULT_MEM                 Default new-job memory. Default: 16G
   FASRC_DEFAULT_NEW_COUNT           Default count for fasrc new/--new. Default: 1
   FASRC_DEFAULT_REMOTE_PATH         Remote path to open when no path is supplied.
+  FASRC_PATH_ALIASES_FILE           Local path alias file. Default: ~/.config/fasrc/paths.env
   FASRC_DEFAULT_PARTITION           Default SLURM partition for new jobs.
   FASRC_DEFAULT_ACCOUNT             Default SLURM account for new jobs.
   FASRC_DEFAULT_CONSTRAINT          Default SLURM constraint for new jobs.
@@ -1186,6 +1211,82 @@ build_remote_uri() {
   printf 'vscode-remote://ssh-remote+%s%s\n' "$alias" "$resolved"
 }
 
+path_alias_value() {
+  local alias="$1"
+
+  [[ -f "$PATH_ALIASES_FILE" ]] || return 1
+
+  awk -v want="$alias" '
+    /^[[:space:]]*(#|$)/ {
+      next
+    }
+
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      sep = index(line, "=")
+      if (sep == 0) {
+        next
+      }
+
+      key = substr(line, 1, sep - 1)
+      value = substr(line, sep + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+
+      if ((substr(value, 1, 1) == "\"" && substr(value, length(value), 1) == "\"") ||
+          (substr(value, 1, 1) == "'"'"'" && substr(value, length(value), 1) == "'"'"'")) {
+        value = substr(value, 2, length(value) - 2)
+      }
+
+      if (key == want && value != "") {
+        print value
+        found = 1
+        exit
+      }
+    }
+
+    END {
+      exit(found ? 0 : 1)
+    }
+  ' "$PATH_ALIASES_FILE"
+}
+
+resolve_remote_path_alias() {
+  local input="$1"
+  local alias suffix value
+
+  [[ -n "$input" ]] || {
+    printf '%s\n' "$input"
+    return
+  }
+
+  case "$input" in
+    "."|"~"|/*)
+      printf '%s\n' "$input"
+      return
+      ;;
+  esac
+
+  alias="${input%%/*}"
+  suffix=""
+  if [[ "$input" == */* ]]; then
+    suffix="${input#*/}"
+  fi
+
+  if value="$(path_alias_value "$alias")"; then
+    if [[ -n "$suffix" ]]; then
+      printf '%s/%s\n' "${value%/}" "$suffix"
+    else
+      printf '%s\n' "$value"
+    fi
+    return
+  fi
+
+  printf '%s\n' "$input"
+}
+
 ensure_extensions_file() {
   if [[ -f "$EXTENSIONS_FILE" ]]; then
     return
@@ -1276,6 +1377,54 @@ extensions_cmd() {
       ;;
     *)
       die "Unknown extensions action: $action. Try 'fasrc help extensions'."
+      ;;
+  esac
+}
+
+paths_cmd() {
+  local action="${1:-list}"
+  local line key value
+
+  case "$action" in
+    list)
+      printf 'Path alias file: %s\n' "$PATH_ALIASES_FILE"
+      if [[ ! -f "$PATH_ALIASES_FILE" ]]; then
+        printf '  (none configured)\n'
+        return
+      fi
+
+      while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -n "$line" && "$line" != \#* && "$line" == *=* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        printf '  %s = %s\n' "$key" "$value"
+      done <"$PATH_ALIASES_FILE"
+      ;;
+    path)
+      printf '%s\n' "$PATH_ALIASES_FILE"
+      ;;
+    edit)
+      mkdir -p "$(dirname "$PATH_ALIASES_FILE")"
+      touch "$PATH_ALIASES_FILE"
+      if command -v code >/dev/null 2>&1; then
+        code "$PATH_ALIASES_FILE"
+      elif [[ -n "${EDITOR:-}" ]]; then
+        "$EDITOR" "$PATH_ALIASES_FILE"
+      else
+        printf 'Edit this file: %s\n' "$PATH_ALIASES_FILE"
+      fi
+      ;;
+    -h|--help|help)
+      help_cmd paths
+      ;;
+    *)
+      die "Unknown paths action: $action. Try 'fasrc help paths'."
       ;;
   esac
 }
@@ -1639,6 +1788,7 @@ launch_cmd() {
   if ((open_path_set == 0)) && [[ -n "$DEFAULT_REMOTE_PATH" ]]; then
     open_path="$DEFAULT_REMOTE_PATH"
   fi
+  open_path="$(resolve_remote_path_alias "$open_path")"
 
   [[ -z "$requested_job" || "$force_new" -eq 0 ]] || die "Use either --job or --new/allocation options, not both."
 
@@ -1921,6 +2071,10 @@ case "$subcommand" in
   extensions|extension|ext)
     shift || true
     extensions_cmd "$@"
+    ;;
+  paths|path|path-aliases|aliases)
+    shift || true
+    paths_cmd "$@"
     ;;
   bootstrap)
     shift || true

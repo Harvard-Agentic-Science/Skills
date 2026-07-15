@@ -33,6 +33,7 @@ fasrc new -n 3 --no-open
 fasrc update
 fasrc setup
 fasrc extensions list
+fasrc paths
 fasrc help
 ```
 
@@ -79,6 +80,28 @@ FASRC_DEFAULT_ACCOUNT=my_lab
 With `FASRC_DEFAULT_NEW_COUNT=3`, `fasrc new` behaves like `fasrc new -n 3`.
 The plain `fasrc` command still reuses one existing job, and if no job exists it
 allocates one job unless you explicitly run `fasrc new`.
+
+## Path Aliases
+
+Local remote path aliases can live in:
+
+```text
+~/.config/fasrc/paths.env
+```
+
+Format:
+
+```sh
+name=/remote/path
+```
+
+Then use the alias anywhere a remote path is accepted:
+
+```sh
+fasrc open JOB_ID name
+fasrc new -n 3 name
+fasrc open JOB_ID name/subdir
+```
 
 ## What Installation Changes
 
