@@ -123,6 +123,7 @@ Usage:
   fasrc setup [--job JOB_ID | --all | --current]
   fasrc extensions [list|add|path|edit]
   fasrc paths [list|path|edit]
+  fasrc login
   fasrc bootstrap
   fasrc status
   fasrc stop [--job JOB_ID | --all]
@@ -138,11 +139,12 @@ Subcommands:
   extensions
             Manage the extension ID list used by setup/update.
   paths     List or edit local remote-path aliases.
+  login     Establish or check the cached FASRC SSH login.
   status    List running fasrc jobs and refresh local SSH aliases.
   stop      Cancel the preferred fasrc job, a specific job, or all of them.
   bootstrap Ensure local and cluster SSH public keys are in authorized_keys.
-  help      Show this help. Topics: launch, update, extensions, paths, status, stop,
-            bootstrap, examples, env.
+  help      Show this help. Topics: launch, update, extensions, paths, login,
+            status, stop, bootstrap, examples, env.
 
 Job selection:
   - Jobs are discovered by SLURM job name fasrc.
@@ -322,6 +324,24 @@ Examples:
   fasrc open 12345678 warped
   fasrc new -n 3 embed
   fasrc open 12345678 warped/subdir
+EOF
+      ;;
+    login|auth|ssh-login)
+      cat <<'EOF'
+Login:
+  fasrc login
+
+What it does:
+  - Establishes the cached SSH control connection to the FASRC login host.
+  - This is the connection VS Code Remote-SSH reuses through ProxyJump.
+  - Run it once after reboot, Wi-Fi changes, or if VS Code starts asking for
+    FASRC passwords again.
+
+Verify:
+  ssh -O check fasrc
+
+Expected output includes:
+  Master running
 EOF
       ;;
     status|jobs|query)
@@ -1948,6 +1968,23 @@ bootstrap_cmd() {
   printf 'FASRC authorized_keys bootstrap complete.\n'
 }
 
+login_cmd() {
+  local control_path=""
+
+  ensure_login_connection
+  control_path="$(ssh -G "$LOGIN_HOST" 2>/dev/null | awk '/^controlpath / {print $2; exit}')"
+
+  if ssh -O check "$LOGIN_HOST" >/dev/null 2>&1; then
+    printf 'Cached SSH login to %s is active.\n' "$LOGIN_HOST"
+    if [[ -n "$control_path" ]]; then
+      printf 'Control socket: %s\n' "$control_path"
+    fi
+    return
+  fi
+
+  die "Could not verify cached SSH login to $LOGIN_HOST."
+}
+
 status_cmd() {
   local jobs target_entry current_job current_alias job_id node alias marker
 
@@ -2075,6 +2112,10 @@ case "$subcommand" in
   paths|path|path-aliases|aliases)
     shift || true
     paths_cmd "$@"
+    ;;
+  login|auth)
+    shift || true
+    login_cmd "$@"
     ;;
   bootstrap)
     shift || true

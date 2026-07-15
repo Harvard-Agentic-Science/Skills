@@ -34,6 +34,7 @@ fasrc update
 fasrc setup
 fasrc extensions list
 fasrc paths
+fasrc login
 fasrc help
 ```
 
@@ -102,6 +103,24 @@ fasrc open JOB_ID name
 fasrc new -n 3 name
 fasrc open JOB_ID name/subdir
 ```
+
+## Cached Login
+
+If VS Code starts asking for a FASRC password again, recreate the local SSH
+master socket once:
+
+```sh
+fasrc login
+```
+
+Then reload or reopen the VS Code Remote-SSH windows. You can verify the socket
+with:
+
+```sh
+ssh -O check fasrc
+```
+
+Expected output includes `Master running`.
 
 ## What Installation Changes
 
