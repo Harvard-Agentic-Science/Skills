@@ -142,8 +142,10 @@ Local personal defaults can live in:
 ~/.config/fasrc/defaults.env
 ```
 
-That file is sourced by `fasrc` before defaults are computed. Command-line flags
-still win. Useful entries include:
+That file is parsed as data before defaults are computed; it is never executed as
+shell code. Only the documented `FASRC_DEFAULT_*`, `FASRC_MAX_SLURM_TIME`, and
+`FASRC_SUBMIT_INTERVAL` keys are accepted. Command-line flags still win. Useful
+entries include:
 
 ```sh
 FASRC_DEFAULT_NEW_COUNT=3
@@ -217,7 +219,6 @@ Expected output includes `Master running`.
 The installer is idempotent and only manages the FASRC workflow files:
 
 - `~/.local/bin/fasrc`
-- `~/.local/bin/fasrc-proxy`
 - `~/.config/fasrc/extensions.txt`
 - `~/.ssh/config`
 - `~/.ssh/fasrc_compute_config`
@@ -225,7 +226,11 @@ The installer is idempotent and only manages the FASRC workflow files:
 - your shell rc file, to add `~/.local/bin` to `PATH`
 
 `fasrc setup` also updates VS Code user `settings.json` with Remote-SSH,
-extension, and LaTeX Workshop defaults.
+extension, and LaTeX Workshop defaults. Before its first change, it preserves the
+original file as `settings.json.fasrc-backup`. JSON-with-comments (JSONC) is
+accepted; comments remain in the backup while the updated settings are written as
+strict JSON. Existing LaTeX recipes, tools, viewer choice, and PDF association are
+preserved.
 
 On the FASRC login host, the utility also maintains
 `~/.local/bin/fasrc-alloc`, a small helper used to submit and wait for the
@@ -286,6 +291,28 @@ and one remote extension setup can be reused by multiple live compute jobs.
 That is the part that avoids repeatedly downloading the VS Code server and
 extensions into per-node `/tmp`.
 
+The `fasrc-compute` alias points to the current preferred job after `fasrc status`
+or a launch command. It uses that node's real host-key identity with
+`StrictHostKeyChecking accept-new`; host-key verification is never disabled.
+
+If a multi-job allocation fails partway through, `fasrc` cancels the jobs created
+by that failed batch. It does not cancel older jobs or unrelated SLURM work.
+
+## Security Notes
+
+- CLI and configuration values are encoded before they cross SSH, so they are not
+  reinterpreted as remote shell syntax.
+- The saved-current-job file is parsed as numeric data and is never sourced.
+- Personal configuration, state, and generated SSH files are restricted to the
+  owning user (`700` directories and `600` files).
+- `ControlPersist 96h` intentionally leaves a reusable authenticated SSH socket
+  for up to four days. The socket directory is mode `700`; run
+  `ssh -O exit fasrc` to close it early.
+- If no local Ed25519 key exists, the installer creates a passwordless key so
+  unattended compute-node connections work. Protect the Mac account and private
+  key; users who require a passphrase should create and load their own
+  `~/.ssh/id_ed25519` before installation.
+
 ## Troubleshooting
 
 - VS Code asks for your password again: run `fasrc login`, confirm
@@ -332,7 +359,7 @@ After installing:
 command -v fasrc
 fasrc extensions list
 fasrc setup --local-only --no-local-update
-bash tests/smoke.sh
+bash tests/run.sh
 ```
 
 Only `fasrc` should be a public command. Old prerelease names such as
@@ -343,7 +370,7 @@ Only `fasrc` should be a public command. Old prerelease names such as
 To remove the installed command files:
 
 ```sh
-rm -f ~/.local/bin/fasrc ~/.local/bin/fasrc-proxy
+rm -f ~/.local/bin/fasrc
 ```
 
 Optionally remove the remote allocator after closing all `fasrc-vscode` jobs:

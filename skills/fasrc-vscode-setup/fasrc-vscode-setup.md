@@ -42,7 +42,6 @@ You help the user install or update the shared `fasrc` VS Code workflow utility.
 ## What the Utility Edits
 
 - `~/.local/bin/fasrc`
-- `~/.local/bin/fasrc-proxy`
 - `~/.config/fasrc/extensions.txt`
 - `~/.ssh/config`
 - `~/.ssh/fasrc_compute_config`
