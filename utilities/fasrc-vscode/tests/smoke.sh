@@ -70,8 +70,17 @@ grep -qxF '  User fasrc-smoke-user-2' "$TEST_HOME/.ssh/config" || fail "updated 
 grep -qxF 'Host fasrc-compute-12345' "$TEST_HOME/.ssh/fasrc_compute_config" || fail "live job alias was not preserved"
 ! grep -qxF 'Host fasrc-compute' "$TEST_HOME/.ssh/fasrc_compute_config" || fail "insecure legacy generic alias was preserved"
 
+HOME="$TEST_HOME" FASRC_SOURCE_ONLY=1 bash -c 'source "$1"; REMOTE_USER=fasrc-smoke-user-2; write_compute_include "12345|compute.example.edu" 12345' _ "$FASRC_BIN"
+
 effective_user="$(HOME="$TEST_HOME" ssh -F "$TEST_HOME/.ssh/config" -G fasrc 2>/dev/null | awk '/^user / { print $2; exit }')"
 [[ "$effective_user" == 'fasrc-smoke-user-2' ]] || fail "effective SSH username was not updated"
+
+effective_compute="$(HOME="$TEST_HOME" ssh -F "$TEST_HOME/.ssh/config" -G fasrc-compute-12345 2>/dev/null)"
+[[ "$(printf '%s\n' "$effective_compute" | awk '$1 == "hostname" { print $2; exit }')" == 'compute.example.edu' ]] || fail "compute include was not active"
+[[ "$(printf '%s\n' "$effective_compute" | awk '$1 == "user" { print $2; exit }')" == 'fasrc-smoke-user-2' ]] || fail "compute alias user was not applied"
+[[ "$(printf '%s\n' "$effective_compute" | awk '$1 == "proxyjump" { print $2; exit }')" == 'fasrc' ]] || fail "compute ProxyJump was not applied"
+[[ "$(printf '%s\n' "$effective_compute" | awk '$1 == "identitiesonly" { print $2; exit }')" == 'yes' ]] || fail "compute identity policy was not applied"
+[[ "$(printf '%s\n' "$effective_compute" | awk '$1 == "stricthostkeychecking" { print $2; exit }')" == 'accept-new' ]] || fail "compute host-key policy was not applied"
 
 ALIAS_HOME="$TEST_HOME/custom alias"
 HOME="$ALIAS_HOME" \
