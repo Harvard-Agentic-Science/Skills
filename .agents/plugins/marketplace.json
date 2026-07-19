@@ -1,0 +1,20 @@
+{
+  "name": "harvard-agentic-science",
+  "interface": {
+    "displayName": "Harvard Agentic Science"
+  },
+  "plugins": [
+    {
+      "name": "grant-researcher",
+      "source": {
+        "source": "local",
+        "path": "./plugins/grant-researcher"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

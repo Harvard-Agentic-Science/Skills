@@ -11,6 +11,31 @@ This repository can also include shared workflow utilities. Utilities are not
 agent prompts; they are installable scripts or configuration packages that make
 research computing workflows easier to reproduce.
 
+## Using a Codex plugin
+
+Codex plugins package reusable skills so they can be installed across research
+repositories. Add this repository as a marketplace once:
+
+```sh
+codex plugin marketplace add Harvard-Agentic-Science/Skills
+```
+
+Then install a plugin:
+
+```sh
+codex plugin add grant-researcher@harvard-agentic-science
+```
+
+Start Codex in any Git repository and invoke it explicitly:
+
+```text
+Use $grant-researcher to research "NSF Physics Frontiers Centers" and create a grant workspace in this repository.
+```
+
+Available Codex plugins:
+
+- [`grant-researcher`](plugins/grant-researcher/) — researches a funding opportunity, prior awardees, competitors, collaborators, requirements, and project fit, then creates a sourced proposal workspace under `grants/`.
+
 ## Using a skill
 
 1. Find a skill in `skills/` that fits your task.
@@ -53,6 +78,10 @@ description. Use the templates in `template/` as a starting point:
 
 For utilities, add a self-contained folder under `utilities/` with a README and
 any install scripts or configuration files it needs.
+
+For Codex plugins, add a valid package under `plugins/` and register it in
+`.agents/plugins/marketplace.json`. Keep reusable workflows in the plugin's
+`skills/` directory and include deterministic scripts for repeatable setup.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full walkthrough.
 
