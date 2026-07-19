@@ -52,7 +52,9 @@ fasrc new
 ```
 
 The first remote connection installs the VS Code server and extensions under
-your FASRC home directory, so it can take longer than later connections.
+your FASRC home directory, so it can take longer than later connections. The
+utility also installs its pinned `latexmk` into the shared FASRC home on the
+first full setup or launch.
 
 ## Three-Window Demo
 
@@ -235,7 +237,10 @@ preserved.
 
 On the FASRC login host, the utility also maintains
 `~/.local/bin/fasrc-alloc`, a small helper used to submit and wait for the
-utility's SLURM jobs.
+utility's SLURM jobs, and `~/.local/share/fasrc/bin/latexmk`, the pinned LaTeX
+Workshop build tool. The latter is downloaded from the latexmk author's
+versioned HTTPS archive and verified against both archive and script SHA-256
+checksums before installation.
 
 ## VS Code Setup
 
@@ -277,6 +282,16 @@ fasrc setup
 
 The recipe is path-safe: it runs `latexmk` from the TeX file's directory and
 passes only the file basename, which avoids issues with spaces in parent paths.
+It invokes the managed executable at
+`~/.local/share/fasrc/bin/latexmk` explicitly instead of relying on the VS Code
+server's `PATH`. On a local, non-FASRC VS Code window where that managed path is
+absent, the recipe falls back to a locally installed `latexmk` on `PATH`.
+
+`fasrc setup` (without `--local-only`) and all `fasrc` launch/open/new commands
+verify the managed executable and install pinned latexmk 4.88 when it is absent
+or differs from the expected checksum. The FASRC login host must provide
+`curl`, `unzip`, `perl`, and either `sha256sum` or `shasum`; setup stops with a
+specific error if any prerequisite or integrity check fails.
 
 ## Persistence
 
@@ -382,7 +397,7 @@ rm -f ~/.local/bin/fasrc
 Optionally remove the remote allocator after closing all `fasrc-vscode` jobs:
 
 ```sh
-ssh fasrc 'rm -f ~/.local/bin/fasrc-alloc'
+ssh fasrc 'rm -f ~/.local/bin/fasrc-alloc ~/.local/share/fasrc/bin/latexmk'
 ```
 
 Then remove the FASRC include line and generated `Host fasrc` block from

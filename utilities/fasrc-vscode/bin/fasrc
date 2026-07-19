@@ -86,6 +86,10 @@ STATE_FILE="$STATE_DIR/current.env"
 EXTENSIONS_FILE="${FASRC_VSCODE_EXTENSIONS_FILE:-$CONFIG_DIR/extensions.txt}"
 VSCODE_QUALITY="${FASRC_VSCODE_QUALITY:-stable}"
 VSCODE_RELEASES_URL="${FASRC_VSCODE_RELEASES_URL:-https://update.code.visualstudio.com/api/releases/$VSCODE_QUALITY}"
+LATEXMK_VERSION="4.88"
+LATEXMK_ARCHIVE_URL="https://www.cantab.net/users/johncollins/latexmk/latexmk-488.zip"
+LATEXMK_ARCHIVE_SHA256="b145a1ccfbde15985a517341dbd6510d391dfc21919c649669ebc977d91aa57f"
+LATEXMK_SCRIPT_SHA256="c1b26a396bdeb975855afac668b2490652292dcaec958880bc87ce51295be13b"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -297,6 +301,8 @@ Behavior:
   - The script opens a new VS Code window unless FASRC_REUSE_WINDOW=1.
   - Before opening VS Code, it refreshes ~/.ssh/fasrc_compute_config and VS Code
     Remote-SSH settings for the target compute alias.
+  - It verifies a pinned latexmk under the shared FASRC home and installs it
+    from the author's versioned archive when missing or changed.
   - By default, the VS Code server path is persistent:
     REMOTE_HOME/.vscode-server-fasrc
 
@@ -343,6 +349,7 @@ What update does:
 What setup does:
   - Same remote setup behavior as update.
   - Also runs the local extension update unless --no-local-update is used.
+  - Unless --local-only is used, verifies or installs the managed remote latexmk.
 
 Job selection:
   --all                 Apply to all running fasrc-vscode jobs. This is default.
@@ -975,13 +982,11 @@ ensure_vscode_remote_settings() {
           ((.["latex-workshop.latex.tools"] // []) | map(select(.name != "latexmk-fasrc"))) +
           [{
             "name": "latexmk-fasrc",
-            "command": "latexmk",
+            "command": "bash",
             "args": [
-              "-pdf",
-              "-synctex=1",
-              "-interaction=nonstopmode",
-              "-file-line-error",
-              "-outdir=build",
+              "-c",
+              "tool=\"$HOME/.local/share/fasrc/bin/latexmk\"; if [[ ! -x \"$tool\" ]]; then tool=\"$(command -v latexmk || true)\"; fi; test -n \"$tool\" || { echo \"fasrc: latexmk is missing; run fasrc setup\" >&2; exit 127; }; exec \"$tool\" -pdf -synctex=1 -interaction=nonstopmode -file-line-error -outdir=build \"./$1\"",
+              "fasrc-latexmk",
               "%DOCFILE_EXT%"
             ],
             "cwd": "%DIR%",
@@ -1037,13 +1042,11 @@ ensure_vscode_remote_settings() {
           ((.["latex-workshop.latex.tools"] // []) | map(select(.name != "latexmk-fasrc"))) +
           [{
             "name": "latexmk-fasrc",
-            "command": "latexmk",
+            "command": "bash",
             "args": [
-              "-pdf",
-              "-synctex=1",
-              "-interaction=nonstopmode",
-              "-file-line-error",
-              "-outdir=build",
+              "-c",
+              "tool=\"$HOME/.local/share/fasrc/bin/latexmk\"; if [[ ! -x \"$tool\" ]]; then tool=\"$(command -v latexmk || true)\"; fi; test -n \"$tool\" || { echo \"fasrc: latexmk is missing; run fasrc setup\" >&2; exit 127; }; exec \"$tool\" -pdf -synctex=1 -interaction=nonstopmode -file-line-error -outdir=build \"./$1\"",
+              "fasrc-latexmk",
               "%DOCFILE_EXT%"
             ],
             "cwd": "%DIR%",
@@ -1114,13 +1117,11 @@ ensure_vscode_base_settings() {
           ((.["latex-workshop.latex.tools"] // []) | map(select(.name != "latexmk-fasrc"))) +
           [{
             "name": "latexmk-fasrc",
-            "command": "latexmk",
+            "command": "bash",
             "args": [
-              "-pdf",
-              "-synctex=1",
-              "-interaction=nonstopmode",
-              "-file-line-error",
-              "-outdir=build",
+              "-c",
+              "tool=\"$HOME/.local/share/fasrc/bin/latexmk\"; if [[ ! -x \"$tool\" ]]; then tool=\"$(command -v latexmk || true)\"; fi; test -n \"$tool\" || { echo \"fasrc: latexmk is missing; run fasrc setup\" >&2; exit 127; }; exec \"$tool\" -pdf -synctex=1 -interaction=nonstopmode -file-line-error -outdir=build \"./$1\"",
+              "fasrc-latexmk",
               "%DOCFILE_EXT%"
             ],
             "cwd": "%DIR%",
@@ -1167,13 +1168,11 @@ ensure_vscode_base_settings() {
           ((.["latex-workshop.latex.tools"] // []) | map(select(.name != "latexmk-fasrc"))) +
           [{
             "name": "latexmk-fasrc",
-            "command": "latexmk",
+            "command": "bash",
             "args": [
-              "-pdf",
-              "-synctex=1",
-              "-interaction=nonstopmode",
-              "-file-line-error",
-              "-outdir=build",
+              "-c",
+              "tool=\"$HOME/.local/share/fasrc/bin/latexmk\"; if [[ ! -x \"$tool\" ]]; then tool=\"$(command -v latexmk || true)\"; fi; test -n \"$tool\" || { echo \"fasrc: latexmk is missing; run fasrc setup\" >&2; exit 127; }; exec \"$tool\" -pdf -synctex=1 -interaction=nonstopmode -file-line-error -outdir=build \"./$1\"",
+              "fasrc-latexmk",
               "%DOCFILE_EXT%"
             ],
             "cwd": "%DIR%",
@@ -1343,6 +1342,127 @@ while true; do
 
   sleep "$poll_seconds"
 done
+REMOTE
+}
+
+install_remote_latexmk() {
+  local version_b64 archive_url_b64 archive_sha256_b64 script_sha256_b64
+
+  version_b64="$(encode_remote_arg "$LATEXMK_VERSION")"
+  archive_url_b64="$(encode_remote_arg "$LATEXMK_ARCHIVE_URL")"
+  archive_sha256_b64="$(encode_remote_arg "$LATEXMK_ARCHIVE_SHA256")"
+  script_sha256_b64="$(encode_remote_arg "$LATEXMK_SCRIPT_SHA256")"
+
+  printf 'Checking managed latexmk on %s...\n' "$LOGIN_HOST"
+  ssh "$LOGIN_HOST" "bash -s" -- \
+    "$version_b64" \
+    "$archive_url_b64" \
+    "$archive_sha256_b64" \
+    "$script_sha256_b64" <<'REMOTE'
+set -euo pipefail
+umask 077
+
+decode_arg() {
+  printf '%s' "$1" | base64 -d
+}
+
+version="$(decode_arg "$1")"
+archive_url="$(decode_arg "$2")"
+archive_sha256="$(decode_arg "$3")"
+script_sha256="$(decode_arg "$4")"
+target="$HOME/.local/share/fasrc/bin/latexmk"
+
+[[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || {
+  printf 'Invalid managed latexmk version: %s\n' "$version" >&2
+  exit 1
+}
+[[ "$archive_url" == https://* ]] || {
+  printf 'Refusing non-HTTPS latexmk archive URL: %s\n' "$archive_url" >&2
+  exit 1
+}
+[[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+  printf 'Invalid latexmk archive SHA-256.\n' >&2
+  exit 1
+}
+[[ "$script_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+  printf 'Invalid latexmk script SHA-256.\n' >&2
+  exit 1
+}
+
+command -v perl >/dev/null 2>&1 || {
+  printf 'Perl is required to run latexmk on FASRC.\n' >&2
+  exit 1
+}
+
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    printf 'Neither sha256sum nor shasum is available on FASRC.\n' >&2
+    return 1
+  fi
+}
+
+if [[ -f "$target" ]] && [[ "$(hash_file "$target")" == "$script_sha256" ]]; then
+  chmod 755 "$target"
+  version_output="$("$target" -v 2>&1)"
+  [[ "$version_output" == *"Version $version"* ]] || {
+    printf 'Managed latexmk failed its version check at %s.\n' "$target" >&2
+    exit 1
+  }
+  printf 'Managed latexmk %s is ready at %s.\n' "$version" "$target"
+  exit 0
+fi
+
+command -v curl >/dev/null 2>&1 || {
+  printf 'curl is required to install latexmk on FASRC.\n' >&2
+  exit 1
+}
+command -v unzip >/dev/null 2>&1 || {
+  printf 'unzip is required to install latexmk on FASRC.\n' >&2
+  exit 1
+}
+
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/fasrc-latexmk.XXXXXX")"
+target_tmp=""
+cleanup_latexmk_install() {
+  rm -rf "$tmp_dir"
+  [[ -z "$target_tmp" ]] || rm -f "$target_tmp"
+}
+trap cleanup_latexmk_install EXIT INT TERM HUP
+archive="$tmp_dir/latexmk.zip"
+candidate="$tmp_dir/latexmk"
+
+curl --proto '=https' --tlsv1.2 -fsSL "$archive_url" -o "$archive"
+actual_archive_sha256="$(hash_file "$archive")"
+[[ "$actual_archive_sha256" == "$archive_sha256" ]] || {
+  printf 'latexmk archive checksum mismatch: expected %s, got %s.\n' \
+    "$archive_sha256" "$actual_archive_sha256" >&2
+  exit 1
+}
+
+unzip -p "$archive" latexmk/latexmk.pl >"$candidate"
+actual_script_sha256="$(hash_file "$candidate")"
+[[ "$actual_script_sha256" == "$script_sha256" ]] || {
+  printf 'latexmk script checksum mismatch: expected %s, got %s.\n' \
+    "$script_sha256" "$actual_script_sha256" >&2
+  exit 1
+}
+
+version_output="$(perl "$candidate" -v 2>&1)"
+[[ "$version_output" == *"Version $version"* ]] || {
+  printf 'Downloaded latexmk did not report expected version %s.\n' "$version" >&2
+  exit 1
+}
+
+mkdir -p "$(dirname "$target")"
+target_tmp="$(mktemp "${target}.new.XXXXXX")"
+install -m 755 "$candidate" "$target_tmp"
+mv "$target_tmp" "$target"
+target_tmp=""
+printf 'Installed managed latexmk %s at %s.\n' "$version" "$target"
 REMOTE
 }
 
@@ -1972,6 +2092,7 @@ setup_vscode_cmd() {
   fi
 
   ensure_login_connection
+  install_remote_latexmk
   jobs="$(list_remote_jobs)"
   if [[ -z "$jobs" ]]; then
     clear_current_job
@@ -2163,6 +2284,7 @@ launch_cmd() {
   ensure_login_connection
   bootstrap_remote_keys
   install_remote_allocator
+  install_remote_latexmk
 
   jobs="$(list_remote_jobs)"
 
