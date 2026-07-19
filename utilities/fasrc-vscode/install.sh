@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
 CONFIG_DIR="${FASRC_CONFIG_DIR:-$HOME/.config/fasrc}"
+LOGIN_ALIAS_FILE="$CONFIG_DIR/login-alias"
 SSH_CONFIG="${FASRC_SSH_CONFIG:-$HOME/.ssh/config}"
 SSH_INCLUDE="${FASRC_SSH_INCLUDE_FILE:-$HOME/.ssh/fasrc_compute_config}"
 FASRC_HOST="${FASRC_HOST:-login.rc.fas.harvard.edu}"
@@ -79,7 +80,7 @@ require_safe_token "FASRC host" "$FASRC_HOST"
 require_safe_token "FASRC alias" "$FASRC_ALIAS"
 
 missing_commands=()
-for required_command in ssh ssh-keygen awk perl base64 jq code; do
+for required_command in ssh ssh-keygen awk perl base64 jq code readlink; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     missing_commands+=("$required_command")
   fi
@@ -92,6 +93,9 @@ fi
 
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$HOME/.ssh" "$HOME/.ssh/sockets"
 chmod 700 "$CONFIG_DIR" "$HOME/.ssh" "$HOME/.ssh/sockets"
+
+printf '%s\n' "$FASRC_ALIAS" >"$LOGIN_ALIAS_FILE"
+chmod 600 "$LOGIN_ALIAS_FILE"
 
 rm -f "$BIN_DIR/fasrc" "$BIN_DIR/fasrc-proxy" "$BIN_DIR/fasrc-code" "$BIN_DIR/fasrc-code-proxy"
 rm -rf "$HOME/.local/state/fasrc-code"
@@ -159,7 +163,40 @@ EOF
   awk \
     -v managed_begin="$managed_begin" \
     -v managed_end="$managed_end" \
-    -v include_path="$SSH_INCLUDE" '
+    -v include_path="$SSH_INCLUDE" \
+    -v home_dir="$HOME" \
+    -v ssh_dir="$HOME/.ssh" '
+      function trim(value) {
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        return value
+      }
+
+      function canonical_include(value, first, last) {
+        value = trim(value)
+        first = substr(value, 1, 1)
+        last = substr(value, length(value), 1)
+        if ((first == "\"" && last == "\"") || (first == "'" && last == "'")) {
+          value = substr(value, 2, length(value) - 2)
+        }
+        if (value == "~") {
+          return home_dir
+        }
+        if (substr(value, 1, 2) == "~/") {
+          return home_dir "/" substr(value, 3)
+        }
+        if (value == "$HOME") {
+          return home_dir
+        }
+        if (substr(value, 1, 6) == "$HOME/") {
+          return home_dir "/" substr(value, 7)
+        }
+        if (substr(value, 1, 1) != "/") {
+          return ssh_dir "/" value
+        }
+        return value
+      }
+
       $0 == managed_begin { in_managed = 1; next }
       $0 == managed_end { in_managed = 0; next }
       in_managed { next }
@@ -167,7 +204,8 @@ EOF
       tolower($1) == "include" {
         line = $0
         sub(/^[[:space:]]*[Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]]+/, "", line)
-        if (line == include_path || line == "\"" include_path "\"") {
+        sub(/[[:space:]]+#[^\n]*$/, "", line)
+        if (canonical_include(line) == canonical_include(include_path)) {
           next
         }
       }
@@ -199,16 +237,26 @@ case "${SHELL:-}" in
     ;;
 esac
 
-touch "$rc_file"
-tmp_rc="$(mktemp)"
+rc_update_file="$rc_file"
+if [[ -L "$rc_file" ]]; then
+  rc_link_target="$(readlink "$rc_file")"
+  case "$rc_link_target" in
+    /*) rc_update_file="$rc_link_target" ;;
+    *) rc_update_file="$(dirname "$rc_file")/$rc_link_target" ;;
+  esac
+fi
+
+touch "$rc_update_file"
+tmp_rc="$(mktemp "${rc_update_file}.fasrc.XXXXXX")"
+cp -p "$rc_update_file" "$tmp_rc"
 awk '
   $0 == "alias fasrc-workspace='\''fasrc'\''" { next }
   $0 == "alias fasrc-workspace='\''fasrc-code'\''" { next }
   { print }
-' "$rc_file" >"$tmp_rc"
-mv "$tmp_rc" "$rc_file"
-if ! grep -qxF "$path_line" "$rc_file"; then
-  printf '\n%s\n' "$path_line" >>"$rc_file"
+' "$rc_update_file" >"$tmp_rc"
+mv "$tmp_rc" "$rc_update_file"
+if ! grep -qxF "$path_line" "$rc_update_file"; then
+  printf '\n%s\n' "$path_line" >>"$rc_update_file"
 fi
 
 "$BIN_DIR/fasrc" help >/dev/null
@@ -221,6 +269,7 @@ Command:
 
 Config:
   $CONFIG_DIR/extensions.txt
+  $LOGIN_ALIAS_FILE
   $SSH_CONFIG
 
 Next:

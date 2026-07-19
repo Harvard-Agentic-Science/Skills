@@ -219,6 +219,7 @@ Expected output includes `Master running`.
 The installer is idempotent and only manages the FASRC workflow files:
 
 - `~/.local/bin/fasrc`
+- `~/.config/fasrc/login-alias`
 - `~/.config/fasrc/extensions.txt`
 - `~/.ssh/config`
 - `~/.ssh/fasrc_compute_config`
@@ -341,7 +342,12 @@ Host fasrc
 ```
 
 Nothing in the scripts hard-codes a specific user. `fasrc` reads the remote user
-from SSH config with `ssh -G fasrc`.
+from SSH config through the configured login alias (`fasrc` by default).
+
+The installer stores its validated login alias in
+`~/.config/fasrc/login-alias`, so a custom `FASRC_ALIAS` remains effective after
+the installer process exits. `FASRC_LOGIN_HOST` can still override it for an
+individual command.
 
 ## Command Name
 

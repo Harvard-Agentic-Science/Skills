@@ -50,8 +50,22 @@ load_defaults_file() {
 
 load_defaults_file
 
-LOGIN_HOST="${FASRC_LOGIN_HOST:-fasrc}"
+LOGIN_ALIAS_FILE="$CONFIG_DIR/login-alias"
+CONFIGURED_LOGIN_HOST=""
+if [[ -f "$LOGIN_ALIAS_FILE" ]]; then
+  IFS= read -r CONFIGURED_LOGIN_HOST <"$LOGIN_ALIAS_FILE" || true
+fi
+
+LOGIN_HOST="${FASRC_LOGIN_HOST:-${CONFIGURED_LOGIN_HOST:-fasrc}}"
 REMOTE_ALIAS="${FASRC_COMPUTE_ALIAS:-fasrc-compute}"
+[[ "$LOGIN_HOST" =~ ^[A-Za-z0-9._-]+$ ]] || {
+  printf 'Invalid FASRC login alias: %s\n' "$LOGIN_HOST" >&2
+  exit 1
+}
+[[ "$REMOTE_ALIAS" =~ ^[A-Za-z0-9._-]+$ ]] || {
+  printf 'Invalid FASRC compute alias: %s\n' "$REMOTE_ALIAS" >&2
+  exit 1
+}
 JOB_NAME="${FASRC_JOB_NAME:-fasrc-vscode}"
 DEFAULT_TIME="${FASRC_DEFAULT_TIME:-70:00:00}"
 DEFAULT_CPUS="${FASRC_DEFAULT_CPUS:-8}"
@@ -557,6 +571,7 @@ Timeouts:
 
 Files managed:
   ~/.ssh/fasrc_compute_config       Local SSH aliases for live jobs.
+  ~/.config/fasrc/login-alias       Login alias selected by the installer.
   ~/.config/fasrc/extensions.txt    Remote extension setup list.
   ~/.local/state/fasrc/current.env
                                     Saved preferred job.
@@ -932,14 +947,15 @@ ensure_vscode_remote_settings() {
   if [[ -s "$normalized_file" ]]; then
     jq \
       --arg alias "$alias" \
+      --arg remote_alias "$REMOTE_ALIAS" \
       --arg install_root "$install_root" \
       --argjson extensions "$extensions_json" \
       '
         .["remote.SSH.serverInstallPath"] = (.["remote.SSH.serverInstallPath"] // {}) |
-        .["remote.SSH.serverInstallPath"]["fasrc-compute"] = $install_root |
+        .["remote.SSH.serverInstallPath"][$remote_alias] = $install_root |
         .["remote.SSH.serverInstallPath"][$alias] = $install_root |
         .["remote.SSH.remotePlatform"] = (.["remote.SSH.remotePlatform"] // {}) |
-        .["remote.SSH.remotePlatform"]["fasrc-compute"] = "linux" |
+        .["remote.SSH.remotePlatform"][$remote_alias] = "linux" |
         .["remote.SSH.remotePlatform"][$alias] = "linux" |
         .["remote.SSH.connectTimeout"] //= 120 |
         if ($extensions | length) > 0 then
@@ -989,16 +1005,17 @@ ensure_vscode_remote_settings() {
   else
     jq -n \
       --arg alias "$alias" \
+      --arg remote_alias "$REMOTE_ALIAS" \
       --arg install_root "$install_root" \
       --argjson extensions "$extensions_json" \
       '
         {
           "remote.SSH.serverInstallPath": {
-            "fasrc-compute": $install_root,
+            ($remote_alias): $install_root,
             ($alias): $install_root
           },
           "remote.SSH.remotePlatform": {
-            "fasrc-compute": "linux",
+            ($remote_alias): "linux",
             ($alias): "linux"
           },
           "remote.SSH.connectTimeout": 120
@@ -1074,6 +1091,7 @@ ensure_vscode_base_settings() {
 
   if [[ -s "$normalized_file" ]]; then
     jq \
+      --arg remote_alias "$REMOTE_ALIAS" \
       --argjson extensions "$extensions_json" \
       '
         if ($extensions | length) > 0 then
@@ -1081,8 +1099,8 @@ ensure_vscode_base_settings() {
         else
           .
         end |
-        .["remote.SSH.serverInstallPath"] = ((.["remote.SSH.serverInstallPath"] // {}) | with_entries(select(.key | test("^fasrc-compute(-.*)?$") | not))) |
-        .["remote.SSH.remotePlatform"] = (((.["remote.SSH.remotePlatform"] // {}) | with_entries(select(.key | test("^fasrc-compute(-.*)?$") | not))) + {"fasrc-compute": "linux"}) |
+        .["remote.SSH.serverInstallPath"] = (.["remote.SSH.serverInstallPath"] // {}) |
+        .["remote.SSH.remotePlatform"] = ((.["remote.SSH.remotePlatform"] // {}) + {($remote_alias): "linux"}) |
         .["remote.SSH.connectTimeout"] //= 120 |
         .["latex-workshop.latex.recipe.default"] //= "latexmk-fasrc" |
         .["latex-workshop.latex.recipes"] = (
@@ -1125,6 +1143,7 @@ ensure_vscode_base_settings() {
       }
   else
     jq -n \
+      --arg remote_alias "$REMOTE_ALIAS" \
       --argjson extensions "$extensions_json" \
       '
         {} |
@@ -1134,7 +1153,7 @@ ensure_vscode_base_settings() {
           .
         end |
         .["remote.SSH.serverInstallPath"] = {} |
-        .["remote.SSH.remotePlatform"] = {"fasrc-compute": "linux"} |
+        .["remote.SSH.remotePlatform"] = {($remote_alias): "linux"} |
         .["remote.SSH.connectTimeout"] //= 120 |
         .["latex-workshop.latex.recipe.default"] //= "latexmk-fasrc" |
         .["latex-workshop.latex.recipes"] = (

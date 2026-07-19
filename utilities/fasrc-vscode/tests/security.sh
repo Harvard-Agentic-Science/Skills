@@ -75,6 +75,20 @@ jq -e 'any(."latex-workshop.latex.recipes"[]; .name == "latexmk-fasrc")' "$CODE_
 test -f "$CODE_USER_SETTINGS.fasrc-backup" || fail "settings backup was not created"
 grep -q 'Existing user choices' "$CODE_USER_SETTINGS.fasrc-backup" || fail "JSONC backup did not preserve comments"
 
+ensure_vscode_remote_settings fasrc-compute-12345 /shared/vscode-server 1
+ensure_vscode_base_settings 1
+jq -e '.["remote.SSH.serverInstallPath"]["fasrc-compute"] == "/shared/vscode-server"' "$CODE_USER_SETTINGS" >/dev/null || fail "local-only setup removed the generic server path"
+jq -e '.["remote.SSH.serverInstallPath"]["fasrc-compute-12345"] == "/shared/vscode-server"' "$CODE_USER_SETTINGS" >/dev/null || fail "local-only setup removed a job server path"
+
+REMOTE_ALIAS=custom-compute
+CODE_USER_SETTINGS="$TEST_HOME/custom-settings.json"
+ensure_vscode_remote_settings "$(job_alias 67890)" /shared/custom-vscode-server 0
+jq -e '.["remote.SSH.serverInstallPath"]["custom-compute"] == "/shared/custom-vscode-server"' "$CODE_USER_SETTINGS" >/dev/null || fail "custom generic compute alias was not configured"
+jq -e '.["remote.SSH.remotePlatform"]["custom-compute"] == "linux"' "$CODE_USER_SETTINGS" >/dev/null || fail "custom generic compute platform was not configured"
+jq -e '.["remote.SSH.serverInstallPath"] | has("fasrc-compute") | not' "$CODE_USER_SETTINGS" >/dev/null || fail "hard-coded generic compute alias remains"
+ensure_vscode_base_settings 0
+jq -e '.["remote.SSH.serverInstallPath"]["custom-compute-67890"] == "/shared/custom-vscode-server"' "$CODE_USER_SETTINGS" >/dev/null || fail "base setup removed a custom job server path"
+
 allocation_claim="$TEST_HOME/allocation-claim"
 cancelled_entries="$TEST_HOME/cancelled-entries"
 allocate_new_job() {
