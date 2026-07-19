@@ -1,0 +1,36 @@
+{
+  "name": "grant-researcher",
+  "version": "0.1.0",
+  "description": "Research funding opportunities and create auditable proposal workspaces in scientific repositories.",
+  "author": {
+    "name": "Harvard Agentic Science",
+    "url": "https://github.com/Harvard-Agentic-Science"
+  },
+  "homepage": "https://github.com/Harvard-Agentic-Science/Skills",
+  "repository": "https://github.com/Harvard-Agentic-Science/Skills",
+  "keywords": [
+    "grants",
+    "research",
+    "proposals",
+    "funding",
+    "science"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Grant Researcher",
+    "shortDescription": "Research grants and scaffold proposal workspaces",
+    "longDescription": "Builds a sourced, refreshable grant dossier inside a Git repository, including requirements, prior awards, competitors, partners, fit analysis, and proposal scaffolding.",
+    "developerName": "Harvard Agentic Science",
+    "category": "Productivity",
+    "capabilities": [
+      "Research",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Harvard-Agentic-Science/Skills",
+    "defaultPrompt": [
+      "Research a grant and create its workspace.",
+      "Refresh this repository's grant dossier.",
+      "Find prior winners and proposal competitors."
+    ]
+  }
+}

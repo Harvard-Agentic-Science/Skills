@@ -1,0 +1,4 @@
+interface:
+  display_name: "Grant Researcher"
+  short_description: "Research grants and scaffold proposal workspaces"
+  default_prompt: "Use $grant-researcher to research this grant and create a proposal workspace in the current repository."

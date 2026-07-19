@@ -34,6 +34,20 @@ Utilities live under `utilities/` and should be self-contained.
 5. Make installers idempotent: re-running them should update the utility safely.
 6. Document every user-owned file the utility edits.
 
+## Contributing a Codex plugin
+
+1. Create the plugin under `plugins/<plugin-name>/` with a valid
+   `.codex-plugin/plugin.json` manifest.
+2. Put reusable workflows under
+   `plugins/<plugin-name>/skills/<skill-name>/SKILL.md`.
+3. Register the plugin in `.agents/plugins/marketplace.json`.
+4. Validate every skill and the plugin manifest before opening a pull request.
+5. Add tests for deterministic scripts and forward-test complex agent workflows
+   in a clean repository.
+
+Use lowercase hyphenated names and avoid credentials, personal paths, or
+institution-specific assumptions in reusable packages.
+
 ## Questions?
 
 Open an issue or visit **https://harvardai.pages.dev** for more context on agentic workflows.
