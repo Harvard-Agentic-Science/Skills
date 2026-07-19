@@ -1,0 +1,2478 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_DIR="${FASRC_CONFIG_DIR:-$HOME/.config/fasrc}"
+DEFAULTS_FILE="${FASRC_DEFAULTS_FILE:-$CONFIG_DIR/defaults.env}"
+PATH_ALIASES_FILE="${FASRC_PATH_ALIASES_FILE:-$CONFIG_DIR/paths.env}"
+
+load_defaults_file() {
+  local line key value
+
+  [[ -f "$DEFAULTS_FILE" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -n "$line" && "$line" != \#* ]] || continue
+    [[ "$line" == *=* ]] || {
+      printf 'Invalid defaults line in %s: %s\n' "$DEFAULTS_FILE" "$line" >&2
+      exit 1
+    }
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    case "$key" in
+      FASRC_DEFAULT_TIME|FASRC_DEFAULT_CPUS|FASRC_DEFAULT_MEM|FASRC_DEFAULT_NEW_COUNT|\
+      FASRC_DEFAULT_REMOTE_PATH|FASRC_DEFAULT_PARTITION|FASRC_DEFAULT_ACCOUNT|\
+      FASRC_DEFAULT_CONSTRAINT|FASRC_DEFAULT_GRES|FASRC_DEFAULT_QOS|\
+      FASRC_DEFAULT_RESERVATION|FASRC_MAX_SLURM_TIME|FASRC_SUBMIT_INTERVAL)
+        ;;
+      *)
+        printf 'Unsupported defaults key in %s: %s\n' "$DEFAULTS_FILE" "$key" >&2
+        exit 1
+        ;;
+    esac
+
+    if [[ ${#value} -ge 2 ]]; then
+      if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] ||
+         [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+    fi
+    printf -v "$key" '%s' "$value"
+    export "$key"
+  done <"$DEFAULTS_FILE"
+}
+
+load_defaults_file
+
+LOGIN_ALIAS_FILE="$CONFIG_DIR/login-alias"
+CONFIGURED_LOGIN_HOST=""
+if [[ -f "$LOGIN_ALIAS_FILE" ]]; then
+  IFS= read -r CONFIGURED_LOGIN_HOST <"$LOGIN_ALIAS_FILE" || true
+fi
+
+LOGIN_HOST="${FASRC_LOGIN_HOST:-${CONFIGURED_LOGIN_HOST:-fasrc}}"
+REMOTE_ALIAS="${FASRC_COMPUTE_ALIAS:-fasrc-compute}"
+[[ "$LOGIN_HOST" =~ ^[A-Za-z0-9._-]+$ ]] || {
+  printf 'Invalid FASRC login alias: %s\n' "$LOGIN_HOST" >&2
+  exit 1
+}
+[[ "$REMOTE_ALIAS" =~ ^[A-Za-z0-9._-]+$ ]] || {
+  printf 'Invalid FASRC compute alias: %s\n' "$REMOTE_ALIAS" >&2
+  exit 1
+}
+JOB_NAME="${FASRC_JOB_NAME:-fasrc-vscode}"
+DEFAULT_TIME="${FASRC_DEFAULT_TIME:-70:00:00}"
+DEFAULT_CPUS="${FASRC_DEFAULT_CPUS:-8}"
+DEFAULT_MEM="${FASRC_DEFAULT_MEM:-16G}"
+DEFAULT_NEW_COUNT="${FASRC_DEFAULT_NEW_COUNT:-1}"
+DEFAULT_REMOTE_PATH="${FASRC_DEFAULT_REMOTE_PATH:-}"
+DEFAULT_PARTITION="${FASRC_DEFAULT_PARTITION:-shared}"
+DEFAULT_ACCOUNT="${FASRC_DEFAULT_ACCOUNT:-}"
+DEFAULT_CONSTRAINT="${FASRC_DEFAULT_CONSTRAINT:-}"
+DEFAULT_GRES="${FASRC_DEFAULT_GRES:-}"
+DEFAULT_QOS="${FASRC_DEFAULT_QOS:-}"
+DEFAULT_RESERVATION="${FASRC_DEFAULT_RESERVATION:-}"
+MAX_SLURM_TIME="${FASRC_MAX_SLURM_TIME:-72:00:00}"
+LOCAL_PUBKEY="${FASRC_LOCAL_PUBKEY:-$HOME/.ssh/id_ed25519.pub}"
+SSH_INCLUDE="${FASRC_SSH_INCLUDE_FILE:-$HOME/.ssh/fasrc_compute_config}"
+STATE_DIR="${FASRC_STATE_DIR:-$HOME/.local/state/fasrc}"
+STATE_FILE="$STATE_DIR/current.env"
+EXTENSIONS_FILE="${FASRC_VSCODE_EXTENSIONS_FILE:-$CONFIG_DIR/extensions.txt}"
+VSCODE_QUALITY="${FASRC_VSCODE_QUALITY:-stable}"
+VSCODE_RELEASES_URL="${FASRC_VSCODE_RELEASES_URL:-https://update.code.visualstudio.com/api/releases/$VSCODE_QUALITY}"
+
+die() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+encode_remote_arg() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+load_saved_job() {
+  local state_file="${1:-$STATE_FILE}"
+  local saved_job
+
+  [[ -f "$state_file" ]] || return 1
+  saved_job="$(awk -F= '
+    $1 == "CURRENT_JOB" && $2 ~ /^[0-9]+$/ {
+      print $2
+      found = 1
+      exit
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$state_file")" || return 1
+  printf '%s\n' "$saved_job"
+}
+
+slurm_time_to_seconds() {
+  local value="$1"
+  local days=0
+  local rest="$value"
+  local hours=0
+  local minutes=0
+  local seconds=0
+  local part
+  local -a parts
+
+  [[ -n "$value" ]] || return 1
+
+  if [[ "$value" == *-* ]]; then
+    days="${value%%-*}"
+    rest="${value#*-}"
+    [[ "$days" =~ ^[0-9]+$ && -n "$rest" && "$rest" != "$value" ]] || return 1
+  fi
+
+  IFS=':' read -r -a parts <<<"$rest"
+  [[ "${#parts[@]}" -ge 1 && "${#parts[@]}" -le 3 ]] || return 1
+
+  for part in "$days" "${parts[@]}"; do
+    [[ "$part" =~ ^[0-9]+$ ]] || return 1
+  done
+
+  case "${#parts[@]}" in
+    1)
+      if [[ "$value" == *-* ]]; then
+        hours="${parts[0]}"
+      else
+        minutes="${parts[0]}"
+      fi
+      ;;
+    2)
+      if [[ "$value" == *-* ]]; then
+        hours="${parts[0]}"
+        minutes="${parts[1]}"
+      else
+        minutes="${parts[0]}"
+        seconds="${parts[1]}"
+      fi
+      ;;
+    3)
+      hours="${parts[0]}"
+      minutes="${parts[1]}"
+      seconds="${parts[2]}"
+      ;;
+  esac
+
+  ((10#$minutes < 60 && 10#$seconds < 60)) || return 1
+  printf '%d\n' $((10#$days * 86400 + 10#$hours * 3600 + 10#$minutes * 60 + 10#$seconds))
+}
+
+require_slurm_time_within_limit() {
+  local value="$1"
+  local seconds max_seconds
+
+  seconds="$(slurm_time_to_seconds "$value")" || die "Invalid SLURM time '$value'. Use HH:MM:SS, minutes, minutes:seconds, or days-hours:minutes:seconds."
+  max_seconds="$(slurm_time_to_seconds "$MAX_SLURM_TIME")" || die "Invalid FASRC_MAX_SLURM_TIME '$MAX_SLURM_TIME'."
+
+  ((seconds <= max_seconds)) || die "SLURM time $value exceeds the configured max of $MAX_SLURM_TIME."
+}
+
+require_positive_integer() {
+  local name="$1"
+  local value="$2"
+
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive integer."
+}
+
+require_submit_interval() {
+  local value="$1"
+
+  [[ "$value" =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die "FASRC_SUBMIT_INTERVAL must be a number of seconds."
+  awk -v value="$value" 'BEGIN { exit !(value >= 0.5) }' || die "FASRC_SUBMIT_INTERVAL must be at least 0.5 seconds to respect FASRC scheduler guidance."
+}
+
+usage() {
+  cat <<'EOF'
+fasrc opens VS Code on FASRC SLURM compute nodes.
+
+Usage:
+  fasrc [options] [remote-path]
+  fasrc launch [options] [remote-path]
+  fasrc resume [options] [remote-path]
+  fasrc open JOB_ID [remote-path]
+  fasrc new [options] [remote-path]
+  fasrc update [--job JOB_ID | --all | --current]
+  fasrc setup [--job JOB_ID | --all | --current]
+  fasrc extensions [list|add|path|edit]
+  fasrc paths [list|path|edit]
+  fasrc login
+  fasrc bootstrap
+  fasrc status
+  fasrc stop [--job JOB_ID | --all]
+  fasrc help [topic]
+
+Subcommands:
+  launch    Default action. Reuse a running job, or allocate one if none exist.
+  resume    Same as launch; kept as a readable alias.
+  open      Open a specific running job by job ID.
+  new       Force a fresh SLURM allocation, then open it in VS Code.
+  update    Check VS Code version, update local extensions, and apply setup.
+  setup     Apply the configured VS Code server path and remote extensions.
+  extensions
+            Manage the extension ID list used by setup/update.
+  paths     List or edit local remote-path aliases.
+  login     Establish or check the cached FASRC SSH login.
+  status    List running fasrc-vscode jobs and refresh local SSH aliases.
+  stop      Cancel the preferred fasrc-vscode job, a specific job, or all of them.
+  bootstrap Ensure local and cluster SSH public keys are in authorized_keys.
+  help      Show this help. Topics: launch, update, extensions, paths, login,
+            status, stop, bootstrap, examples, env.
+
+Job selection:
+  - Jobs are discovered by SLURM job name fasrc-vscode.
+  - Existing jobs are reused by default.
+  - The saved preferred job is reused first; otherwise the highest job ID is used.
+  - Use --job JOB_ID to open a specific running job.
+  - Each running job gets an SSH alias: fasrc-compute-JOB_ID
+  - The generic alias fasrc-compute points to the current preferred live job.
+
+Launch options:
+  --new                 Force a new SLURM allocation
+  -n, --count N         Allocate N new jobs, submitted one second apart.
+  --job JOB_ID          Reuse a specific existing job
+  --time HH:MM:SS       SLURM wall time (default: 70:00:00; max: 72:00:00)
+  --cpus N              CPUs per task (default when creating: 8)
+  --mem SIZE            Memory request, e.g. 16G (default when creating: 16G)
+  --partition NAME      SLURM partition
+  --account NAME        SLURM account
+  --constraint VALUE    SLURM constraint
+  --gres VALUE          SLURM gres request
+  --qos NAME            SLURM qos
+  --reservation NAME    SLURM reservation
+  --no-open             Update SSH config/settings, but do not open VS Code
+  --                    Pass any remaining args directly to sbatch
+
+Remote path:
+  - No path, "." or "~" opens the remote home directory.
+  - Relative paths are resolved under the remote home directory.
+  - Absolute paths are opened as-is.
+
+Examples:
+  fasrc status
+  fasrc --job 12345678
+  fasrc open 12345678
+  fasrc --job 12345678 project
+  fasrc update --all
+  fasrc extensions add ms-python.python ms-toolsai.jupyter
+  fasrc paths
+  fasrc new project
+  fasrc new -n 3 project
+  fasrc stop --job 12345678
+
+More detail:
+  fasrc help launch
+  fasrc help update
+  fasrc help examples
+EOF
+}
+
+help_cmd() {
+  local topic="${1:-overview}"
+
+  case "$topic" in
+    overview|all|-h|--help)
+      usage
+      ;;
+    launch|resume|new)
+      cat <<'EOF'
+Launch, resume, open, and new:
+  fasrc [options] [remote-path]
+  fasrc launch [options] [remote-path]
+  fasrc resume [options] [remote-path]
+  fasrc open JOB_ID [remote-path]
+  fasrc new [options] [remote-path]
+
+Behavior:
+  - launch/resume/default reuse an existing running fasrc-vscode job when possible.
+  - new, --new, or any allocation option forces a fresh SLURM job.
+  - If no running fasrc-vscode jobs exist, launch allocates a new one.
+  - The script opens a new VS Code window unless FASRC_REUSE_WINDOW=1.
+  - Before opening VS Code, it refreshes ~/.ssh/fasrc_compute_config and VS Code
+    Remote-SSH settings for the target compute alias.
+  - By default, the VS Code server path is persistent:
+    REMOTE_HOME/.vscode-server-fasrc
+
+Useful options:
+  --job JOB_ID          Open one specific running fasrc-vscode job.
+  --new                 Force a new job.
+  -n, --count N         Allocate N new jobs, submitted one second apart.
+  --time HH:MM:SS       Wall time for new jobs. Default: 70:00:00. Max: 72:00:00.
+  --cpus N              CPUs per task for new jobs. Default: 8.
+  --mem SIZE            Memory for new jobs. Default: 16G.
+  --partition NAME      SLURM partition.
+  --account NAME        SLURM account.
+  --constraint VALUE    SLURM constraint.
+  --gres VALUE          SLURM generic resource request.
+  --qos NAME            SLURM QOS.
+  --reservation NAME    SLURM reservation.
+  --no-open             Refresh SSH config/settings without opening VS Code.
+  --                    Pass remaining arguments directly to sbatch.
+
+Examples:
+  fasrc
+  fasrc --job 12345678
+  fasrc open 12345678
+  fasrc --job 12345678 project
+  fasrc open 12345678 project
+  fasrc new -n 3 project
+  fasrc new -n 3 --no-open
+EOF
+      ;;
+    update|setup|vscode)
+      cat <<'EOF'
+Update and setup:
+  fasrc update [--job JOB_ID | --all | --current]
+  fasrc setup [--job JOB_ID | --all | --current]
+
+What update does:
+  - Prints the installed VS Code version and checks the latest stable version.
+  - Runs "code --update-extensions" for local VS Code extensions.
+  - Refreshes fasrc-compute-JOB_ID SSH aliases for running jobs.
+  - Writes VS Code Remote-SSH settings for a persistent server path.
+  - Adds configured extensions to Remote-SSH's default extension list, so VS
+    Code installs them automatically on SSH hosts.
+
+What setup does:
+  - Same remote setup behavior as update.
+  - Also runs the local extension update unless --no-local-update is used.
+
+Job selection:
+  --all                 Apply to all running fasrc-vscode jobs. This is default.
+  --job JOB_ID          Apply to one running job.
+  --current             Apply only to the saved/current preferred job.
+  --local-only          Only check/update local VS Code; do not touch FASRC.
+  --no-local-update     Skip "code --update-extensions".
+  --no-remote-extensions
+                        Write server settings, but do not add default extensions.
+  --install-now         Also try to install remote extensions immediately on
+                        selected live jobs if the VS Code server is present.
+
+Extension list:
+  fasrc uses ~/.config/fasrc/extensions.txt by default.
+  Blank lines and lines starting with "#" are ignored.
+
+Examples:
+  fasrc update
+  fasrc update --job 12345678
+  fasrc setup --current --no-local-update
+  fasrc extensions add ms-python.python ms-toolsai.jupyter
+EOF
+      ;;
+    extensions|extension|ext)
+      cat <<'EOF'
+Extensions:
+  fasrc extensions
+  fasrc extensions list
+  fasrc extensions add EXT_ID [EXT_ID ...]
+  fasrc extensions path
+  fasrc extensions edit
+  fasrc extensions seed-local
+
+The extension list controls what "fasrc setup" and "fasrc update" add to
+remote.SSH.defaultExtensions. VS Code then installs those extensions
+automatically on SSH hosts. Extension IDs look like publisher.name.
+
+Examples:
+  fasrc extensions add james-yu.latex-workshop
+  fasrc extensions add anthropic.claude-code oscarphysics.claudetex openai.chatgpt
+  fasrc extensions list
+EOF
+      ;;
+    paths|path-aliases|aliases)
+      cat <<'EOF'
+Paths:
+  fasrc paths
+  fasrc paths list
+  fasrc paths path
+  fasrc paths edit
+
+Path aliases are local shortcuts for remote folders. They live in:
+  ~/.config/fasrc/paths.env
+
+Format:
+  name=/remote/path
+
+Examples:
+  fasrc open 12345678 warped
+  fasrc new -n 3 embed
+  fasrc open 12345678 warped/subdir
+EOF
+      ;;
+    login|auth|ssh-login)
+      cat <<'EOF'
+Login:
+  fasrc login
+
+What it does:
+  - Establishes the cached SSH control connection to the FASRC login host.
+  - This is the connection VS Code Remote-SSH reuses through ProxyJump.
+  - Run it once after reboot, Wi-Fi changes, or if VS Code starts asking for
+    FASRC passwords again.
+
+Verify:
+  ssh -O check fasrc
+
+Expected output includes:
+  Master running
+EOF
+      ;;
+    status|jobs|query)
+      cat <<'EOF'
+Status:
+  fasrc status
+
+What it does:
+  - Opens or reuses the cached SSH control connection to the FASRC login host.
+  - Runs squeue on the login host.
+  - Lists only RUNNING jobs whose SLURM job name is fasrc.
+  - Rewrites ~/.ssh/fasrc_compute_config with one alias per running job.
+  - Marks the current preferred job with "*".
+
+Example output:
+  Current alias fasrc-compute points to the preferred live job.
+  Current preferred job: fasrc-compute-12345678
+  * job 12345678 on holy7c08303 (fasrc-compute-12345678)
+    job 12345679 on holy7c06107 (fasrc-compute-12345679)
+
+Open a listed job:
+  fasrc --job 12345678
+
+Open three listed jobs in three VS Code windows:
+  fasrc --job 12345678
+  fasrc --job 12345679
+  fasrc --job 12345680
+EOF
+      ;;
+    stop|cancel|scancel)
+      cat <<'EOF'
+Stop:
+  fasrc stop
+  fasrc stop --job JOB_ID
+  fasrc stop --all
+
+Behavior:
+  - stop cancels the current preferred fasrc-vscode job.
+  - stop --job JOB_ID cancels that specific running fasrc-vscode job.
+  - stop --all cancels all running fasrc-vscode jobs.
+  - After cancellation, local SSH aliases are refreshed for any jobs still running.
+
+Examples:
+  fasrc stop
+  fasrc stop --job 12345678
+  fasrc stop --all
+EOF
+      ;;
+    bootstrap|keys|ssh)
+      cat <<'EOF'
+Bootstrap:
+  fasrc bootstrap
+
+What it does:
+  - Establishes the cached SSH connection to the FASRC login host.
+  - Ensures ~/.ssh/authorized_keys exists on FASRC with safe permissions.
+  - Ensures the cluster's own SSH public key is authorized.
+  - Adds your local public key, normally ~/.ssh/id_ed25519.pub, to FASRC.
+  - Cleans up one old broken authorized_keys line from earlier bootstrap logic.
+
+Launch also runs the bootstrap steps automatically, so you normally do not need
+to run this directly unless SSH key setup needs repair.
+EOF
+      ;;
+    examples|example)
+      cat <<'EOF'
+Examples:
+  # List live fasrc-vscode jobs and refresh aliases.
+  fasrc status
+
+  # Open the preferred live job in VS Code.
+  fasrc
+
+  # Open a specific live job in VS Code.
+  fasrc --job 12345678
+  fasrc open 12345678
+
+  # Open the same project path on three live jobs.
+  fasrc open 12345678 project
+  fasrc open 12345679 project
+  fasrc open 12345680 project
+
+  # Check VS Code version, update local extensions, and setup live jobs.
+  fasrc update
+
+  # Add remote extensions to the setup list.
+  fasrc extensions add ms-python.python ms-toolsai.jupyter
+
+  # Allocate a new default 70-hour, 8-core, 16G job.
+  fasrc new project
+
+  # Allocate three default jobs concurrently without opening VS Code windows.
+  fasrc new -n 3 --no-open
+
+  # Allocate a new job with explicit resources.
+  fasrc new --partition shared --cpus 12 --mem 32G --time 24:00:00 project
+
+  # Pass raw sbatch flags after --.
+  fasrc new -- --mail-type=END --mail-user=you@example.edu
+
+  # Refresh SSH config and VS Code settings without opening a window.
+  fasrc --job 12345678 --no-open
+
+  # Cancel one live job, or all live fasrc-vscode jobs.
+  fasrc stop --job 12345678
+  fasrc stop --all
+EOF
+      ;;
+    env|environment|config)
+      cat <<'EOF'
+Environment variables:
+  FASRC_DEFAULTS_FILE               Personal defaults file. Default: ~/.config/fasrc/defaults.env
+  FASRC_LOGIN_HOST                  SSH host for the login node. Default: fasrc
+  FASRC_COMPUTE_ALIAS               Generic compute alias. Default: fasrc-compute
+  FASRC_JOB_NAME                    SLURM job name to discover. Default: fasrc-vscode
+  FASRC_DEFAULT_TIME                Default new-job wall time. Default: 70:00:00
+  FASRC_DEFAULT_CPUS                Default new-job CPUs per task. Default: 8
+  FASRC_DEFAULT_MEM                 Default new-job memory. Default: 16G
+  FASRC_DEFAULT_NEW_COUNT           Default count for fasrc new/--new. Default: 1
+  FASRC_DEFAULT_REMOTE_PATH         Remote path to open when no path is supplied.
+  FASRC_PATH_ALIASES_FILE           Local path alias file. Default: ~/.config/fasrc/paths.env
+  FASRC_DEFAULT_PARTITION           Default SLURM partition for new jobs. Default: shared
+  FASRC_DEFAULT_ACCOUNT             Default SLURM account for new jobs.
+  FASRC_DEFAULT_CONSTRAINT          Default SLURM constraint for new jobs.
+  FASRC_DEFAULT_GRES                Default SLURM gres request for new jobs.
+  FASRC_DEFAULT_QOS                 Default SLURM QOS for new jobs.
+  FASRC_DEFAULT_RESERVATION         Default SLURM reservation for new jobs.
+  FASRC_MAX_SLURM_TIME              Maximum allowed new-job wall time. Default: 72:00:00
+  FASRC_CONFIG_DIR                  Config directory. Default: ~/.config/fasrc
+  FASRC_VSCODE_EXTENSIONS_FILE      Extension list. Default: ~/.config/fasrc/extensions.txt
+  FASRC_LOCAL_PUBKEY                Local public key for bootstrap. Default: ~/.ssh/id_ed25519.pub
+  FASRC_SSH_INCLUDE_FILE            Generated SSH include file. Default: ~/.ssh/fasrc_compute_config
+  FASRC_STATE_DIR                   State directory. Default: ~/.local/state/fasrc
+  FASRC_VSCODE_SERVER_INSTALL_ROOT  Remote VS Code server path. Default: REMOTE_HOME/.vscode-server-fasrc
+  FASRC_VSCODE_USER_SETTINGS        VS Code settings file to update. Default: ~/Library/Application Support/Code/User/settings.json
+  FASRC_REUSE_WINDOW=1              Reuse a VS Code window instead of opening a new one.
+  FASRC_VSCODE_QUALITY              VS Code release channel. Default: stable
+
+Timeouts:
+  FASRC_SSH_PROBE_TIMEOUT
+  FASRC_SSH_READY_TIMEOUT
+  FASRC_SSH_READY_INTERVAL
+  FASRC_LOGIN_TIMEOUT
+  FASRC_LOGIN_CONNECT_TIMEOUT
+  FASRC_POLL_SECONDS                Remote allocator poll interval while waiting on SLURM. Default: 60 seconds.
+  FASRC_SUBMIT_INTERVAL             Delay between sbatch submissions. Default: 1 second.
+
+Files managed:
+  ~/.ssh/fasrc_compute_config       Local SSH aliases for live jobs.
+  ~/.config/fasrc/login-alias       Login alias selected by the installer.
+  ~/.config/fasrc/extensions.txt    Remote extension setup list.
+  ~/.local/state/fasrc/current.env
+                                    Saved preferred job.
+  VS Code settings.json             Remote-SSH platform and server install path.
+  ~/.local/bin/fasrc-alloc          Remote helper installed on the FASRC login host.
+EOF
+      ;;
+    *)
+      die "Unknown help topic: $topic. Try 'fasrc help'."
+      ;;
+  esac
+}
+
+detect_remote_user() {
+  local user
+  user="$(ssh -G "$LOGIN_HOST" 2>/dev/null | awk '/^user / {print $2; exit}')"
+  if [[ -n "$user" ]]; then
+    printf '%s\n' "$user"
+    return
+  fi
+  printf '%s\n' "$USER"
+}
+
+REMOTE_USER="$(detect_remote_user)"
+VSCODE_SERVER_INSTALL_ROOT_OVERRIDE="${FASRC_VSCODE_SERVER_INSTALL_ROOT:-}"
+CODE_USER_SETTINGS="${FASRC_VSCODE_USER_SETTINGS:-$HOME/Library/Application Support/Code/User/settings.json}"
+SSH_PROBE_TIMEOUT="${FASRC_SSH_PROBE_TIMEOUT:-18}"
+SSH_READY_TIMEOUT="${FASRC_SSH_READY_TIMEOUT:-90}"
+SSH_READY_INTERVAL="${FASRC_SSH_READY_INTERVAL:-3}"
+SSH_LOGIN_TIMEOUT="${FASRC_LOGIN_TIMEOUT:-120}"
+SSH_LOGIN_CONNECT_TIMEOUT="${FASRC_LOGIN_CONNECT_TIMEOUT:-20}"
+SUBMIT_INTERVAL="${FASRC_SUBMIT_INTERVAL:-1}"
+
+job_alias() {
+  printf '%s-%s\n' "$REMOTE_ALIAS" "$1"
+}
+
+append_current_default_block() {
+  local node="$1"
+
+  cat >>"$SSH_INCLUDE" <<EOF
+
+Host $REMOTE_ALIAS
+  HostName $node
+  HostKeyAlias $node
+  User $REMOTE_USER
+  ProxyJump $LOGIN_HOST
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  ServerAliveInterval 60
+  ServerAliveCountMax 3
+  StrictHostKeyChecking accept-new
+EOF
+}
+
+write_placeholder_include() {
+  mkdir -p "$HOME/.ssh"
+  cat >"$SSH_INCLUDE" <<'EOF'
+# Auto-generated by `fasrc`.
+# Active compute-node aliases are written here.
+EOF
+  chmod 600 "$SSH_INCLUDE"
+}
+
+append_host_block() {
+  local alias="$1"
+  local node="$2"
+
+  cat >>"$SSH_INCLUDE" <<EOF
+
+Host $alias
+  HostName $node
+  HostKeyAlias $node
+  User $REMOTE_USER
+  ProxyJump $LOGIN_HOST
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  ServerAliveInterval 60
+  ServerAliveCountMax 3
+  StrictHostKeyChecking accept-new
+EOF
+}
+
+find_job_entry() {
+  local jobs="$1"
+  local target_job="$2"
+  local job_id node
+
+  while IFS='|' read -r job_id node; do
+    [[ -n "$job_id" ]] || continue
+    if [[ "$job_id" == "$target_job" ]]; then
+      printf '%s|%s\n' "$job_id" "$node"
+      return 0
+    fi
+  done <<<"$jobs"
+
+  return 1
+}
+
+choose_default_entry() {
+  local jobs="$1"
+  local saved_job=""
+  local best_job=""
+  local best_node=""
+  local job_id node
+
+  saved_job="$(load_saved_job || true)"
+
+  if [[ -n "$saved_job" ]]; then
+    if find_job_entry "$jobs" "$saved_job" >/dev/null; then
+      find_job_entry "$jobs" "$saved_job"
+      return 0
+    fi
+  fi
+
+  while IFS='|' read -r job_id node; do
+    [[ -n "$job_id" ]] || continue
+    if [[ -z "$best_job" || "$job_id" -gt "$best_job" ]]; then
+      best_job="$job_id"
+      best_node="$node"
+    fi
+  done <<<"$jobs"
+
+  [[ -n "$best_job" ]] || return 1
+  printf '%s|%s\n' "$best_job" "$best_node"
+}
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+
+  perl -e '
+    use strict;
+    use warnings;
+
+    my $timeout = shift @ARGV;
+    my $pid = fork();
+    die "fork failed\n" unless defined $pid;
+
+    if ($pid == 0) {
+      exec @ARGV;
+      exit 127;
+    }
+
+    local $SIG{ALRM} = sub {
+      kill "TERM", $pid;
+      select undef, undef, undef, 0.5;
+      kill "KILL", $pid;
+      exit 124;
+    };
+
+    alarm $timeout;
+    waitpid($pid, 0);
+    exit($? == -1 ? 1 : ($? & 127 ? 128 + ($? & 127) : (($? >> 8) & 255)));
+  ' "$seconds" "$@"
+}
+
+probe_compute_alias() {
+  local alias="$1"
+
+  run_with_timeout "$SSH_PROBE_TIMEOUT" \
+    ssh \
+      -n \
+      -o BatchMode=yes \
+      -o NumberOfPasswordPrompts=0 \
+      -o ConnectionAttempts=1 \
+      -o ConnectTimeout=8 \
+      -o ServerAliveInterval=3 \
+      -o ServerAliveCountMax=1 \
+      "$alias" 'printf ready' >/dev/null 2>&1
+}
+
+wait_for_compute_alias() {
+  local alias="$1"
+  local timeout="${2:-$SSH_READY_TIMEOUT}"
+  local deadline=$((SECONDS + timeout))
+
+  while ((SECONDS <= deadline)); do
+    if probe_compute_alias "$alias"; then
+      return 0
+    fi
+    sleep "$SSH_READY_INTERVAL"
+  done
+
+  return 1
+}
+
+write_compute_include() {
+  local jobs="$1"
+  local current_job="$2"
+  local current_entry current_node
+  local job_id node alias
+
+  current_entry="$(find_job_entry "$jobs" "$current_job")" || die "Current job $current_job is not present in the active job list."
+  current_node="${current_entry#*|}"
+
+  write_placeholder_include
+  append_current_default_block "$current_node"
+
+  while IFS='|' read -r job_id node; do
+    [[ -n "$job_id" ]] || continue
+    alias="$(job_alias "$job_id")"
+    cat >>"$SSH_INCLUDE" <<EOF
+
+# SLURM job $job_id
+EOF
+    append_host_block "$alias" "$node"
+  done <<<"$jobs"
+}
+
+save_current_job() {
+  local job_id="$1"
+  [[ "$job_id" =~ ^[0-9]+$ ]] || die "Refusing invalid job ID in state: $job_id"
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+  printf 'CURRENT_JOB=%s\n' "$job_id" >"$STATE_FILE"
+  chmod 600 "$STATE_FILE"
+}
+
+clear_current_job() {
+  rm -f "$STATE_FILE"
+}
+
+ensure_code_cli() {
+  command -v code >/dev/null 2>&1 || die "The VS Code 'code' CLI is not on PATH. Open a new terminal or source ~/.zshrc."
+}
+
+prepare_code_cli_limits() {
+  ulimit -n 8192 >/dev/null 2>&1 || true
+}
+
+jsonc_to_json() {
+  local source_file="$1"
+
+  perl -0777 -e '
+    use strict;
+    use warnings;
+
+    my $text = <>;
+    my $without_comments = "";
+    my ($in_string, $escaped, $line_comment, $block_comment) = (0, 0, 0, 0);
+
+    for (my $i = 0; $i < length($text); $i++) {
+      my $ch = substr($text, $i, 1);
+      my $next = $i + 1 < length($text) ? substr($text, $i + 1, 1) : "";
+
+      if ($line_comment) {
+        if ($ch eq "\n") {
+          $line_comment = 0;
+          $without_comments .= $ch;
+        }
+        next;
+      }
+      if ($block_comment) {
+        if ($ch eq "*" && $next eq "/") {
+          $block_comment = 0;
+          $i++;
+        } elsif ($ch eq "\n") {
+          $without_comments .= $ch;
+        }
+        next;
+      }
+      if ($in_string) {
+        $without_comments .= $ch;
+        if ($escaped) {
+          $escaped = 0;
+        } elsif ($ch eq "\\") {
+          $escaped = 1;
+        } elsif ($ch eq q{"}) {
+          $in_string = 0;
+        }
+        next;
+      }
+
+      if ($ch eq q{"}) {
+        $in_string = 1;
+        $without_comments .= $ch;
+      } elsif ($ch eq "/" && $next eq "/") {
+        $line_comment = 1;
+        $i++;
+      } elsif ($ch eq "/" && $next eq "*") {
+        $block_comment = 1;
+        $i++;
+      } else {
+        $without_comments .= $ch;
+      }
+    }
+
+    die "unterminated block comment\n" if $block_comment;
+    die "unterminated JSON string\n" if $in_string;
+
+    my $output = "";
+    ($in_string, $escaped) = (0, 0);
+    for (my $i = 0; $i < length($without_comments); $i++) {
+      my $ch = substr($without_comments, $i, 1);
+      if ($in_string) {
+        $output .= $ch;
+        if ($escaped) {
+          $escaped = 0;
+        } elsif ($ch eq "\\") {
+          $escaped = 1;
+        } elsif ($ch eq q{"}) {
+          $in_string = 0;
+        }
+        next;
+      }
+      if ($ch eq q{"}) {
+        $in_string = 1;
+        $output .= $ch;
+        next;
+      }
+      if ($ch eq ",") {
+        my $j = $i + 1;
+        $j++ while $j < length($without_comments) && substr($without_comments, $j, 1) =~ /\s/;
+        if ($j < length($without_comments) && substr($without_comments, $j, 1) =~ /[}\]]/) {
+          next;
+        }
+      }
+      $output .= $ch;
+    }
+
+    print $output;
+  ' "$source_file"
+}
+
+prepare_settings_json() {
+  local settings_file="$1"
+  local normalized_file="$2"
+  local backup_file="${settings_file}.fasrc-backup"
+
+  if [[ ! -f "$settings_file" || ! -s "$settings_file" ]]; then
+    printf '{}\n' >"$normalized_file"
+    return
+  fi
+
+  if [[ ! -e "$backup_file" ]]; then
+    cp -p "$settings_file" "$backup_file"
+  fi
+
+  if jq empty "$settings_file" >/dev/null 2>&1; then
+    cp "$settings_file" "$normalized_file"
+  else
+    jsonc_to_json "$settings_file" >"$normalized_file" || die "Failed to parse VS Code JSONC settings at $settings_file"
+  fi
+
+  jq empty "$normalized_file" >/dev/null 2>&1 || die "VS Code settings are not valid JSON/JSONC: $settings_file"
+}
+
+ensure_vscode_remote_settings() {
+  local alias="$1"
+  local install_root="$2"
+  local manage_extensions="${3:-1}"
+  local settings_file="$CODE_USER_SETTINGS"
+  local tmp_file normalized_file extensions_json
+
+  command -v jq >/dev/null 2>&1 || {
+    printf 'Warning: jq is not available, so VS Code settings were not updated for %s.\n' "$alias" >&2
+    return
+  }
+
+  ensure_extensions_file
+  if [[ "$manage_extensions" == "1" ]]; then
+    extensions_json="$(extension_ids | jq -R . | jq -s .)"
+  else
+    extensions_json="[]"
+  fi
+
+  mkdir -p "$(dirname "$settings_file")"
+  tmp_file="$(mktemp)"
+  normalized_file="$(mktemp)"
+  prepare_settings_json "$settings_file" "$normalized_file"
+
+  if [[ -s "$normalized_file" ]]; then
+    jq \
+      --arg alias "$alias" \
+      --arg remote_alias "$REMOTE_ALIAS" \
+      --arg install_root "$install_root" \
+      --argjson extensions "$extensions_json" \
+      '
+        .["remote.SSH.serverInstallPath"] = (.["remote.SSH.serverInstallPath"] // {}) |
+        .["remote.SSH.serverInstallPath"][$remote_alias] = $install_root |
+        .["remote.SSH.serverInstallPath"][$alias] = $install_root |
+        .["remote.SSH.remotePlatform"] = (.["remote.SSH.remotePlatform"] // {}) |
+        .["remote.SSH.remotePlatform"][$remote_alias] = "linux" |
+        .["remote.SSH.remotePlatform"][$alias] = "linux" |
+        .["remote.SSH.connectTimeout"] //= 120 |
+        if ($extensions | length) > 0 then
+          .["remote.SSH.defaultExtensions"] = (((.["remote.SSH.defaultExtensions"] // []) + $extensions) | unique)
+        else
+          .
+        end |
+        .["latex-workshop.latex.recipe.default"] //= "latexmk-fasrc" |
+        .["latex-workshop.latex.recipes"] = (
+          ((.["latex-workshop.latex.recipes"] // []) | map(select(.name != "latexmk-fasrc"))) +
+          [{
+            "name": "latexmk-fasrc",
+            "tools": ["latexmk-fasrc"]
+          }]
+        ) |
+        .["latex-workshop.latex.tools"] = (
+          ((.["latex-workshop.latex.tools"] // []) | map(select(.name != "latexmk-fasrc"))) +
+          [{
+            "name": "latexmk-fasrc",
+            "command": "latexmk",
+            "args": [
+              "-pdf",
+              "-synctex=1",
+              "-interaction=nonstopmode",
+              "-file-line-error",
+              "-outdir=build",
+              "%DOCFILE_EXT%"
+            ],
+            "cwd": "%DIR%",
+            "env": {}
+          }]
+        ) |
+        .["latex-workshop.latex.outDir"] //= "%DIR%/build" |
+        .["latex-workshop.latex.autoBuild.run"] //= "onSave" |
+        .["latex-workshop.latex.build.enableMagicComments"] //= false |
+        .["latex-workshop.latex.clean.method"] //= "glob" |
+        .["latex-workshop.view.pdf.viewer"] //= "tab" |
+        .["latex-workshop.view.pdf.tab.editorGroup"] //= "right" |
+        if has("latex-workshop.synctex.afterBuild.enabled") then . else .["latex-workshop.synctex.afterBuild.enabled"] = true end |
+        .["latex-workshop.view.pdf.internal.synctex.keybinding"] //= "double-click" |
+        .["workbench.editorAssociations"] = (.["workbench.editorAssociations"] // {}) |
+        .["workbench.editorAssociations"]["*.pdf"] //= "latex-workshop-pdf-hook"
+      ' "$normalized_file" >"$tmp_file" || {
+        rm -f "$tmp_file" "$normalized_file"
+        die "Failed to update VS Code settings at $settings_file"
+      }
+  else
+    jq -n \
+      --arg alias "$alias" \
+      --arg remote_alias "$REMOTE_ALIAS" \
+      --arg install_root "$install_root" \
+      --argjson extensions "$extensions_json" \
+      '
+        {
+          "remote.SSH.serverInstallPath": {
+            ($remote_alias): $install_root,
+            ($alias): $install_root
+          },
+          "remote.SSH.remotePlatform": {
+            ($remote_alias): "linux",
+            ($alias): "linux"
+          },
+          "remote.SSH.connectTimeout": 120
+        } |
+        if ($extensions | length) > 0 then
+          .["remote.SSH.defaultExtensions"] = $extensions
+        else
+          .
+        end |
+        .["latex-workshop.latex.recipe.default"] //= "latexmk-fasrc" |
+        .["latex-workshop.latex.recipes"] = (
+          ((.["latex-workshop.latex.recipes"] // []) | map(select(.name != "latexmk-fasrc"))) +
+          [{
+            "name": "latexmk-fasrc",
+            "tools": ["latexmk-fasrc"]
+          }]
+        ) |
+        .["latex-workshop.latex.tools"] = (
+          ((.["latex-workshop.latex.tools"] // []) | map(select(.name != "latexmk-fasrc"))) +
+          [{
+            "name": "latexmk-fasrc",
+            "command": "latexmk",
+            "args": [
+              "-pdf",
+              "-synctex=1",
+              "-interaction=nonstopmode",
+              "-file-line-error",
+              "-outdir=build",
+              "%DOCFILE_EXT%"
+            ],
+            "cwd": "%DIR%",
+            "env": {}
+          }]
+        ) |
+        .["latex-workshop.latex.outDir"] //= "%DIR%/build" |
+        .["latex-workshop.latex.autoBuild.run"] //= "onSave" |
+        .["latex-workshop.latex.build.enableMagicComments"] //= false |
+        .["latex-workshop.latex.clean.method"] //= "glob" |
+        .["latex-workshop.view.pdf.viewer"] //= "tab" |
+        .["latex-workshop.view.pdf.tab.editorGroup"] //= "right" |
+        if has("latex-workshop.synctex.afterBuild.enabled") then . else .["latex-workshop.synctex.afterBuild.enabled"] = true end |
+        .["latex-workshop.view.pdf.internal.synctex.keybinding"] //= "double-click" |
+        .["workbench.editorAssociations"] = (.["workbench.editorAssociations"] // {}) |
+        .["workbench.editorAssociations"]["*.pdf"] //= "latex-workshop-pdf-hook"
+      ' >"$tmp_file"
+  fi
+
+  mv "$tmp_file" "$settings_file"
+  rm -f "$normalized_file"
+}
+
+ensure_vscode_base_settings() {
+  local manage_extensions="${1:-1}"
+  local settings_file="$CODE_USER_SETTINGS"
+  local tmp_file normalized_file extensions_json
+
+  command -v jq >/dev/null 2>&1 || {
+    printf 'Warning: jq is not available, so VS Code workflow settings were not updated.\n' >&2
+    return
+  }
+
+  ensure_extensions_file
+  if [[ "$manage_extensions" == "1" ]]; then
+    extensions_json="$(extension_ids | jq -R . | jq -s .)"
+  else
+    extensions_json="[]"
+  fi
+
+  mkdir -p "$(dirname "$settings_file")"
+  tmp_file="$(mktemp)"
+  normalized_file="$(mktemp)"
+  prepare_settings_json "$settings_file" "$normalized_file"
+
+  if [[ -s "$normalized_file" ]]; then
+    jq \
+      --arg remote_alias "$REMOTE_ALIAS" \
+      --argjson extensions "$extensions_json" \
+      '
+        if ($extensions | length) > 0 then
+          .["remote.SSH.defaultExtensions"] = (((.["remote.SSH.defaultExtensions"] // []) + $extensions) | unique)
+        else
+          .
+        end |
+        .["remote.SSH.serverInstallPath"] = (.["remote.SSH.serverInstallPath"] // {}) |
+        .["remote.SSH.remotePlatform"] = ((.["remote.SSH.remotePlatform"] // {}) + {($remote_alias): "linux"}) |
+        .["remote.SSH.connectTimeout"] //= 120 |
+        .["latex-workshop.latex.recipe.default"] //= "latexmk-fasrc" |
+        .["latex-workshop.latex.recipes"] = (
+          ((.["latex-workshop.latex.recipes"] // []) | map(select(.name != "latexmk-fasrc"))) +
+          [{
+            "name": "latexmk-fasrc",
+            "tools": ["latexmk-fasrc"]
+          }]
+        ) |
+        .["latex-workshop.latex.tools"] = (
+          ((.["latex-workshop.latex.tools"] // []) | map(select(.name != "latexmk-fasrc"))) +
+          [{
+            "name": "latexmk-fasrc",
+            "command": "latexmk",
+            "args": [
+              "-pdf",
+              "-synctex=1",
+              "-interaction=nonstopmode",
+              "-file-line-error",
+              "-outdir=build",
+              "%DOCFILE_EXT%"
+            ],
+            "cwd": "%DIR%",
+            "env": {}
+          }]
+        ) |
+        .["latex-workshop.latex.outDir"] //= "%DIR%/build" |
+        .["latex-workshop.latex.autoBuild.run"] //= "onSave" |
+        .["latex-workshop.latex.build.enableMagicComments"] //= false |
+        .["latex-workshop.latex.clean.method"] //= "glob" |
+        .["latex-workshop.view.pdf.viewer"] //= "tab" |
+        .["latex-workshop.view.pdf.tab.editorGroup"] //= "right" |
+        if has("latex-workshop.synctex.afterBuild.enabled") then . else .["latex-workshop.synctex.afterBuild.enabled"] = true end |
+        .["latex-workshop.view.pdf.internal.synctex.keybinding"] //= "double-click" |
+        .["workbench.editorAssociations"] = (.["workbench.editorAssociations"] // {}) |
+        .["workbench.editorAssociations"]["*.pdf"] //= "latex-workshop-pdf-hook"
+      ' "$normalized_file" >"$tmp_file" || {
+        rm -f "$tmp_file" "$normalized_file"
+        die "Failed to update VS Code settings at $settings_file"
+      }
+  else
+    jq -n \
+      --arg remote_alias "$REMOTE_ALIAS" \
+      --argjson extensions "$extensions_json" \
+      '
+        {} |
+        if ($extensions | length) > 0 then
+          .["remote.SSH.defaultExtensions"] = $extensions
+        else
+          .
+        end |
+        .["remote.SSH.serverInstallPath"] = {} |
+        .["remote.SSH.remotePlatform"] = {($remote_alias): "linux"} |
+        .["remote.SSH.connectTimeout"] //= 120 |
+        .["latex-workshop.latex.recipe.default"] //= "latexmk-fasrc" |
+        .["latex-workshop.latex.recipes"] = (
+          ((.["latex-workshop.latex.recipes"] // []) | map(select(.name != "latexmk-fasrc"))) +
+          [{
+            "name": "latexmk-fasrc",
+            "tools": ["latexmk-fasrc"]
+          }]
+        ) |
+        .["latex-workshop.latex.tools"] = (
+          ((.["latex-workshop.latex.tools"] // []) | map(select(.name != "latexmk-fasrc"))) +
+          [{
+            "name": "latexmk-fasrc",
+            "command": "latexmk",
+            "args": [
+              "-pdf",
+              "-synctex=1",
+              "-interaction=nonstopmode",
+              "-file-line-error",
+              "-outdir=build",
+              "%DOCFILE_EXT%"
+            ],
+            "cwd": "%DIR%",
+            "env": {}
+          }]
+        ) |
+        .["latex-workshop.latex.outDir"] //= "%DIR%/build" |
+        .["latex-workshop.latex.autoBuild.run"] //= "onSave" |
+        .["latex-workshop.latex.build.enableMagicComments"] //= false |
+        .["latex-workshop.latex.clean.method"] //= "glob" |
+        .["latex-workshop.view.pdf.viewer"] //= "tab" |
+        .["latex-workshop.view.pdf.tab.editorGroup"] //= "right" |
+        if has("latex-workshop.synctex.afterBuild.enabled") then . else .["latex-workshop.synctex.afterBuild.enabled"] = true end |
+        .["latex-workshop.view.pdf.internal.synctex.keybinding"] //= "double-click" |
+        .["workbench.editorAssociations"] = (.["workbench.editorAssociations"] // {}) |
+        .["workbench.editorAssociations"]["*.pdf"] //= "latex-workshop-pdf-hook"
+      ' >"$tmp_file"
+  fi
+
+  mv "$tmp_file" "$settings_file"
+  rm -f "$normalized_file"
+}
+
+ensure_login_connection() {
+  mkdir -p "$HOME/.ssh/sockets"
+  chmod 700 "$HOME/.ssh/sockets"
+
+  if ssh -O check "$LOGIN_HOST" >/dev/null 2>&1; then
+    return
+  fi
+
+  printf 'Authenticating to %s as %s...\n' "$LOGIN_HOST" "$REMOTE_USER" >&2
+  run_with_timeout "$SSH_LOGIN_TIMEOUT" \
+    ssh \
+      -o ConnectTimeout="$SSH_LOGIN_CONNECT_TIMEOUT" \
+      -o ServerAliveInterval=5 \
+      -o ServerAliveCountMax=1 \
+      -MNf "$LOGIN_HOST" || die "Could not establish a cached SSH login to $LOGIN_HOST. Check VPN/network access, then run 'fasrc' again."
+}
+
+reset_login_connection() {
+  local control_path
+
+  printf 'Refreshing %s SSH control connection after a compute-node probe failed.\n' "$LOGIN_HOST" >&2
+  run_with_timeout 8 ssh -O exit "$LOGIN_HOST" >/dev/null 2>&1 || true
+
+  control_path="$(ssh -G "$LOGIN_HOST" 2>/dev/null | awk '/^controlpath / {print $2; exit}')"
+  if [[ -n "$control_path" && -S "$control_path" ]]; then
+    rm -f "$control_path"
+  fi
+
+  ensure_login_connection
+}
+
+bootstrap_remote_keys() {
+  [[ -f "$LOCAL_PUBKEY" ]] || die "Local public key not found: $LOCAL_PUBKEY"
+
+  ssh "$LOGIN_HOST" "bash -s" <<'REMOTE'
+set -euo pipefail
+
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+touch "$HOME/.ssh/authorized_keys"
+chmod 600 "$HOME/.ssh/authorized_keys"
+
+cluster_key=''
+if [[ -f "$HOME/.ssh/id_ed25519.pub" ]]; then
+  cluster_key="$(<"$HOME/.ssh/id_ed25519.pub")"
+elif [[ -f "$HOME/.ssh/id_ed25519" ]]; then
+  cluster_key="$(ssh-keygen -y -f "$HOME/.ssh/id_ed25519")"
+elif [[ -f "$HOME/.ssh/id_rsa.pub" ]]; then
+  cluster_key="$(<"$HOME/.ssh/id_rsa.pub")"
+elif [[ -f "$HOME/.ssh/id_rsa" ]]; then
+  cluster_key="$(ssh-keygen -y -f "$HOME/.ssh/id_rsa")"
+else
+  ssh-keygen -t ed25519 -N '' -f "$HOME/.ssh/id_ed25519" >/dev/null
+  cluster_key="$(<"$HOME/.ssh/id_ed25519.pub")"
+fi
+
+if ! grep -qxF "$cluster_key" "$HOME/.ssh/authorized_keys"; then
+  printf '%s\n' "$cluster_key" >>"$HOME/.ssh/authorized_keys"
+fi
+REMOTE
+
+  local local_key_b64
+  local_key_b64="$(base64 <"$LOCAL_PUBKEY" | tr -d '\n')"
+
+  ssh "$LOGIN_HOST" "bash -s" -- "$local_key_b64" <<'REMOTE'
+set -euo pipefail
+
+local_key="$(printf '%s' "$1" | base64 -d | tr -d '\r\n')"
+
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+touch "$HOME/.ssh/authorized_keys"
+chmod 600 "$HOME/.ssh/authorized_keys"
+
+if ! grep -qxF "$local_key" "$HOME/.ssh/authorized_keys"; then
+  printf '%s\n' "$local_key" >>"$HOME/.ssh/authorized_keys"
+fi
+
+# Clean up the truncated line created by older broken bootstrap logic.
+tmp_file="$(mktemp)"
+grep -vxF 'ssh-ed25519' "$HOME/.ssh/authorized_keys" >"$tmp_file"
+mv "$tmp_file" "$HOME/.ssh/authorized_keys"
+chmod 600 "$HOME/.ssh/authorized_keys"
+REMOTE
+}
+
+install_remote_allocator() {
+  ssh "$LOGIN_HOST" 'mkdir -p "$HOME/.local/bin" "$HOME/.ssh" && chmod 700 "$HOME/.ssh"'
+  ssh "$LOGIN_HOST" "cat > ~/.local/bin/fasrc-alloc && chmod 755 ~/.local/bin/fasrc-alloc" <<'REMOTE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+poll_seconds="${FASRC_POLL_SECONDS:-60}"
+job_name="${FASRC_JOB_NAME:-fasrc-vscode}"
+
+decode_arg() {
+  printf '%s' "$1" | base64 -d
+}
+
+decoded_args=()
+for encoded_arg in "$@"; do
+  decoded_args+=("$(decode_arg "$encoded_arg")")
+done
+
+job_id="$(sbatch --parsable --job-name="$job_name" "${decoded_args[@]}" --wrap='sleep infinity')"
+[[ "$job_id" =~ ^[0-9]+$ ]] || {
+  printf 'Unexpected sbatch job ID: %s\n' "$job_id" >&2
+  exit 1
+}
+
+allocation_complete=0
+cleanup_incomplete_allocation() {
+  if [[ "$allocation_complete" -eq 0 ]]; then
+    scancel "$job_id" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_incomplete_allocation EXIT INT TERM HUP
+
+while true; do
+  status="$(squeue -j "$job_id" -h -o '%T|%N' || true)"
+  if [[ -z "$status" ]]; then
+    printf 'SLURM job %s disappeared before starting.\n' "$job_id" >&2
+    exit 1
+  fi
+
+  state="${status%%|*}"
+  node="${status#*|}"
+
+  case "$state" in
+    RUNNING)
+      if [[ -n "$node" && "$node" != "(null)" && "$node" != "n/a" ]]; then
+        allocation_complete=1
+        printf '%s|%s\n' "$job_id" "$node"
+        exit 0
+      fi
+      ;;
+    PENDING|CONFIGURING|COMPLETING)
+      ;;
+    *)
+      printf 'SLURM job %s entered state %s.\n' "$job_id" "$state" >&2
+      exit 1
+      ;;
+  esac
+
+  sleep "$poll_seconds"
+done
+REMOTE
+}
+
+remote_home() {
+  ssh -n "$LOGIN_HOST" 'printf "%s" "$HOME"'
+}
+
+vscode_server_install_root() {
+  local remote_home_path="$1"
+
+  if [[ -n "$VSCODE_SERVER_INSTALL_ROOT_OVERRIDE" ]]; then
+    case "$VSCODE_SERVER_INSTALL_ROOT_OVERRIDE" in
+      "~")
+        printf '%s\n' "$remote_home_path"
+        ;;
+      "~/"*)
+        printf '%s/%s\n' "${remote_home_path%/}" "${VSCODE_SERVER_INSTALL_ROOT_OVERRIDE#"~/"}"
+        ;;
+      *)
+        printf '%s\n' "$VSCODE_SERVER_INSTALL_ROOT_OVERRIDE"
+        ;;
+    esac
+    return
+  fi
+
+  printf '%s/.vscode-server-fasrc\n' "${remote_home_path%/}"
+}
+
+list_remote_jobs() {
+  local remote_user_b64 job_name_b64
+  remote_user_b64="$(encode_remote_arg "$REMOTE_USER")"
+  job_name_b64="$(encode_remote_arg "$JOB_NAME")"
+
+  ssh "$LOGIN_HOST" "bash -s" -- "$remote_user_b64" "$job_name_b64" <<'REMOTE'
+set -euo pipefail
+
+decode_arg() {
+  printf '%s' "$1" | base64 -d
+}
+
+remote_user="$(decode_arg "$1")"
+job_name="$(decode_arg "$2")"
+
+squeue -u "$remote_user" -h -o '%A|%T|%N|%j' | awk -F'|' -v job_name="$job_name" '
+  $1 ~ /^[0-9]+$/ && $4 == job_name && $2 == "RUNNING" && $3 ~ /^[A-Za-z0-9._-]+$/ {
+    print $1 "|" $3
+  }
+'
+REMOTE
+}
+
+allocate_new_job() {
+  local output job_id node
+  local arg
+  local -a encoded_args=()
+
+  for arg in "$@"; do
+    encoded_args+=("$(encode_remote_arg "$arg")")
+  done
+
+  output="$(ssh -n "$LOGIN_HOST" "~/.local/bin/fasrc-alloc" "${encoded_args[@]}")"
+  [[ -n "$output" ]] || die "Allocator returned no output."
+
+  job_id="${output%%|*}"
+  node="${output#*|}"
+
+  [[ "$job_id" =~ ^[0-9]+$ ]] || die "Allocator returned an invalid job ID: $job_id"
+  [[ "$node" =~ ^[A-Za-z0-9._-]+$ ]] || die "Allocator returned an invalid node name: $node"
+  [[ "$node" != *','* ]] || die "Allocator returned multiple nodes: $node"
+  [[ "$node" != *'['* ]] || die "Allocator returned a compressed nodelist: $node"
+
+  printf '%s|%s\n' "$job_id" "$node"
+}
+
+append_job_entry() {
+  local jobs="$1"
+  local entry="$2"
+
+  if [[ -z "$jobs" ]]; then
+    printf '%s\n' "$entry"
+    return
+  fi
+
+  printf '%s\n%s\n' "$jobs" "$entry"
+}
+
+cancel_job_entries() {
+  local entries="$1"
+  local job_id node encoded
+  local -a encoded_ids=()
+
+  while IFS='|' read -r job_id node; do
+    [[ -n "$job_id" ]] || continue
+    [[ "$job_id" =~ ^[0-9]+$ ]] || die "Refusing to cancel invalid job ID: $job_id"
+    encoded_ids+=("$(encode_remote_arg "$job_id")")
+  done <<<"$entries"
+
+  [[ "${#encoded_ids[@]}" -gt 0 ]] || return 0
+
+  ssh -n "$LOGIN_HOST" "bash -s" -- "${encoded_ids[@]}" <<'REMOTE'
+set -euo pipefail
+
+job_ids=()
+for encoded in "$@"; do
+  job_id="$(printf '%s' "$encoded" | base64 -d)"
+  [[ "$job_id" =~ ^[0-9]+$ ]] || {
+    printf 'Refusing invalid job ID: %s\n' "$job_id" >&2
+    exit 1
+  }
+  job_ids+=("$job_id")
+done
+
+scancel "${job_ids[@]}"
+REMOTE
+}
+
+allocate_new_jobs() {
+  local count="$1"
+  shift
+
+  local tmp_dir pids_file
+  local i pid entry entries=""
+  local allocation_failed=0
+
+  if ((count > 1)); then
+    require_submit_interval "$SUBMIT_INTERVAL"
+  fi
+
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/fasrc-alloc.XXXXXX")"
+  pids_file="$tmp_dir/pids"
+
+  i=1
+  while ((i <= count)); do
+    allocate_new_job "$@" >"$tmp_dir/$i.out" 2>"$tmp_dir/$i.err" &
+    pid="$!"
+    printf '%s %s\n' "$pid" "$i" >>"$pids_file"
+    if ((i < count)); then
+      sleep "$SUBMIT_INTERVAL"
+    fi
+    i=$((i + 1))
+  done
+
+  while read -r pid i; do
+    if ! wait "$pid"; then
+      allocation_failed=1
+      printf 'Allocation %s failed.\n' "$i" >&2
+      sed -n '1,120p' "$tmp_dir/$i.err" >&2
+      continue
+    fi
+
+    entry="$(sed -n '1p' "$tmp_dir/$i.out")"
+    if [[ -z "$entry" ]]; then
+      allocation_failed=1
+      printf 'Allocation %s returned no job information.\n' "$i" >&2
+      continue
+    fi
+
+    entries="$(append_job_entry "$entries" "$entry")"
+  done <"$pids_file"
+
+  rm -rf "$tmp_dir"
+
+  if ((allocation_failed)); then
+    if [[ -n "$entries" ]]; then
+      printf 'Cancelling jobs allocated by this failed batch: %s\n' "$(printf '%s\n' "$entries" | cut -d'|' -f1 | paste -sd, -)" >&2
+      if ! cancel_job_entries "$entries"; then
+        printf 'Automatic cleanup failed. These jobs may still be active:\n%s\n' "$entries" >&2
+      fi
+    fi
+    return 1
+  fi
+  printf '%s\n' "$entries"
+}
+
+build_remote_uri() {
+  local alias="$1"
+  local remote_home_path="$2"
+  local open_path="${3:-}"
+  local resolved="$remote_home_path"
+
+  if [[ -n "$open_path" && "$open_path" != "." && "$open_path" != "~" ]]; then
+    if [[ "$open_path" = /* ]]; then
+      resolved="$open_path"
+    else
+      resolved="${remote_home_path%/}/$open_path"
+    fi
+  fi
+
+  resolved="$(printf '%s' "$resolved" | perl -0777 -pe '
+    s/([^A-Za-z0-9._~\/-])/sprintf("%%%02X", ord($1))/ge;
+  ')"
+
+  printf 'vscode-remote://ssh-remote+%s%s\n' "$alias" "$resolved"
+}
+
+path_alias_value() {
+  local alias="$1"
+
+  [[ -f "$PATH_ALIASES_FILE" ]] || return 1
+
+  awk -v want="$alias" '
+    /^[[:space:]]*(#|$)/ {
+      next
+    }
+
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      sep = index(line, "=")
+      if (sep == 0) {
+        next
+      }
+
+      key = substr(line, 1, sep - 1)
+      value = substr(line, sep + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+
+      if ((substr(value, 1, 1) == "\"" && substr(value, length(value), 1) == "\"") ||
+          (substr(value, 1, 1) == "'"'"'" && substr(value, length(value), 1) == "'"'"'")) {
+        value = substr(value, 2, length(value) - 2)
+      }
+
+      if (key == want && value != "") {
+        print value
+        found = 1
+        exit
+      }
+    }
+
+    END {
+      exit(found ? 0 : 1)
+    }
+  ' "$PATH_ALIASES_FILE"
+}
+
+resolve_remote_path_alias() {
+  local input="$1"
+  local alias suffix value
+
+  [[ -n "$input" ]] || {
+    printf '%s\n' "$input"
+    return
+  }
+
+  case "$input" in
+    "."|"~"|/*)
+      printf '%s\n' "$input"
+      return
+      ;;
+  esac
+
+  alias="${input%%/*}"
+  suffix=""
+  if [[ "$input" == */* ]]; then
+    suffix="${input#*/}"
+  fi
+
+  if value="$(path_alias_value "$alias")"; then
+    if [[ -n "$suffix" ]]; then
+      printf '%s/%s\n' "${value%/}" "$suffix"
+    else
+      printf '%s\n' "$value"
+    fi
+    return
+  fi
+
+  printf '%s\n' "$input"
+}
+
+ensure_extensions_file() {
+  if [[ -f "$EXTENSIONS_FILE" ]]; then
+    chmod 600 "$EXTENSIONS_FILE"
+    return
+  fi
+
+  mkdir -p "$(dirname "$EXTENSIONS_FILE")"
+  cat >"$EXTENSIONS_FILE" <<'EOF'
+# Remote VS Code extensions for `fasrc setup` and `fasrc update`.
+# Add one extension ID per line.
+james-yu.latex-workshop
+anthropic.claude-code
+oscarphysics.claudetex
+openai.chatgpt
+EOF
+  chmod 600 "$EXTENSIONS_FILE"
+}
+
+require_extension_id() {
+  local extension_id="$1"
+  [[ "$extension_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+    die "Invalid VS Code extension ID: $extension_id"
+}
+
+extension_ids() {
+  ensure_extensions_file
+  awk '
+    {
+      sub(/\r$/, "")
+      sub(/[[:space:]]*#.*/, "")
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+      if ($0 != "") {
+        print
+      }
+    }
+  ' "$EXTENSIONS_FILE"
+}
+
+extensions_cmd() {
+  local action="${1:-list}"
+  local ext existing configured
+
+  case "$action" in
+    list)
+      ensure_extensions_file
+      printf 'Extension file: %s\n' "$EXTENSIONS_FILE"
+      configured="$(extension_ids)"
+      if [[ -z "$configured" ]]; then
+        printf '  (none configured)\n'
+      else
+        printf '%s\n' "$configured" | sed 's/^/  /'
+      fi
+      ;;
+    path)
+      ensure_extensions_file
+      printf '%s\n' "$EXTENSIONS_FILE"
+      ;;
+    edit)
+      ensure_extensions_file
+      if command -v code >/dev/null 2>&1; then
+        code "$EXTENSIONS_FILE"
+      elif [[ -n "${EDITOR:-}" ]]; then
+        "$EDITOR" "$EXTENSIONS_FILE"
+      else
+        printf 'Edit this file: %s\n' "$EXTENSIONS_FILE"
+      fi
+      ;;
+    add)
+      shift || true
+      [[ $# -gt 0 ]] || die "Usage: fasrc extensions add EXT_ID [EXT_ID ...]"
+      ensure_extensions_file
+      for ext in "$@"; do
+        require_extension_id "$ext"
+        existing="$(extension_ids | grep -ixF "$ext" || true)"
+        if [[ -n "$existing" ]]; then
+          printf 'Already present: %s\n' "$ext"
+        else
+          printf '%s\n' "$ext" >>"$EXTENSIONS_FILE"
+          printf 'Added: %s\n' "$ext"
+        fi
+      done
+      ;;
+    seed-local)
+      ensure_code_cli
+      ensure_extensions_file
+      while IFS= read -r ext; do
+        [[ -n "$ext" ]] || continue
+        require_extension_id "$ext"
+        existing="$(extension_ids | grep -ixF "$ext" || true)"
+        if [[ -z "$existing" ]]; then
+          printf '%s\n' "$ext" >>"$EXTENSIONS_FILE"
+          printf 'Added: %s\n' "$ext"
+        fi
+      done < <(code --list-extensions 2>/dev/null)
+      ;;
+    -h|--help|help)
+      help_cmd extensions
+      ;;
+    *)
+      die "Unknown extensions action: $action. Try 'fasrc help extensions'."
+      ;;
+  esac
+}
+
+paths_cmd() {
+  local action="${1:-list}"
+  local line key value
+
+  case "$action" in
+    list)
+      printf 'Path alias file: %s\n' "$PATH_ALIASES_FILE"
+      if [[ ! -f "$PATH_ALIASES_FILE" ]]; then
+        printf '  (none configured)\n'
+        return
+      fi
+
+      while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -n "$line" && "$line" != \#* && "$line" == *=* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        printf '  %s = %s\n' "$key" "$value"
+      done <"$PATH_ALIASES_FILE"
+      ;;
+    path)
+      printf '%s\n' "$PATH_ALIASES_FILE"
+      ;;
+    edit)
+      mkdir -p "$(dirname "$PATH_ALIASES_FILE")"
+      touch "$PATH_ALIASES_FILE"
+      chmod 600 "$PATH_ALIASES_FILE"
+      if command -v code >/dev/null 2>&1; then
+        code "$PATH_ALIASES_FILE"
+      elif [[ -n "${EDITOR:-}" ]]; then
+        "$EDITOR" "$PATH_ALIASES_FILE"
+      else
+        printf 'Edit this file: %s\n' "$PATH_ALIASES_FILE"
+      fi
+      ;;
+    -h|--help|help)
+      help_cmd paths
+      ;;
+    *)
+      die "Unknown paths action: $action. Try 'fasrc help paths'."
+      ;;
+  esac
+}
+
+local_vscode_version() {
+  code --version 2>/dev/null | sed -n '1p'
+}
+
+local_vscode_commit() {
+  code --version 2>/dev/null | sed -n '2p'
+}
+
+latest_vscode_version() {
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -fsSL "$VSCODE_RELEASES_URL" 2>/dev/null | sed -E 's/^\["([^"]+)".*/\1/'
+}
+
+check_vscode_update() {
+  local current_version current_commit latest_version
+
+  ensure_code_cli
+  current_version="$(local_vscode_version)"
+  current_commit="$(local_vscode_commit)"
+
+  printf 'Local VS Code: %s\n' "${current_version:-unknown}"
+  if [[ -n "$current_commit" ]]; then
+    printf 'Local VS Code commit: %s\n' "$current_commit"
+  fi
+
+  latest_version="$(latest_vscode_version || true)"
+  if [[ -z "$latest_version" || "$latest_version" == "["* ]]; then
+    printf 'Latest VS Code check: unavailable\n'
+    return
+  fi
+
+  if [[ "$current_version" == "$latest_version" ]]; then
+    printf 'Latest VS Code stable: %s (installed)\n' "$latest_version"
+  else
+    printf 'Latest VS Code stable: %s (update available; use VS Code > Check for Updates)\n' "$latest_version"
+  fi
+}
+
+update_local_extensions() {
+  ensure_code_cli
+  printf 'Updating local VS Code extensions...\n'
+  code --update-extensions || printf 'Warning: local VS Code extension update failed.\n' >&2
+}
+
+install_remote_extensions() {
+  local alias="$1"
+  local install_root="$2"
+  local commit="$3"
+  shift 3
+
+  if [[ $# -eq 0 ]]; then
+    printf 'No remote extensions configured in %s.\n' "$EXTENSIONS_FILE"
+    return 0
+  fi
+
+  local arg
+  local -a encoded_args=()
+
+  for arg in "$install_root" "$commit" "$@"; do
+    encoded_args+=("$(encode_remote_arg "$arg")")
+  done
+
+  printf 'Setting up remote VS Code extensions on %s...\n' "$alias"
+  ssh "$alias" "bash -s" -- "${encoded_args[@]}" <<'REMOTE'
+set -euo pipefail
+
+decode_arg() {
+  printf '%s' "$1" | base64 -d
+}
+
+install_root="$(decode_arg "$1")"
+commit="$(decode_arg "$2")"
+shift 2
+
+decoded_extensions=()
+for encoded_extension in "$@"; do
+  decoded_extensions+=("$(decode_arg "$encoded_extension")")
+done
+
+mkdir -p "$install_root"
+
+server=""
+for candidate in \
+  "$install_root/bin/$commit/bin/code-server" \
+  "$install_root/.vscode-server/bin/$commit/bin/code-server" \
+  "$install_root/cli/servers/Stable-$commit/server/bin/code-server" \
+  "$HOME/.vscode-server/bin/$commit/bin/code-server" \
+  "$HOME/.vscode-server/cli/servers/Stable-$commit/server/bin/code-server"
+do
+  if [[ -x "$candidate" ]]; then
+    server="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$server" ]]; then
+  printf 'No VS Code server for commit %s is installed yet under %s.\n' "$commit" "$install_root" >&2
+  printf 'Open this job once with fasrc --job JOB_ID, wait for VS Code to finish connecting, then run fasrc update --job JOB_ID.\n' >&2
+  exit 20
+fi
+
+printf 'Remote VS Code server: %s\n' "$server"
+failures=0
+for ext in "${decoded_extensions[@]}"; do
+  printf 'Installing/updating %s...\n' "$ext"
+  if "$server" --install-extension "$ext" --force >/dev/null; then
+    printf 'Installed/updated %s\n' "$ext"
+  else
+    printf 'Failed to install/update %s\n' "$ext" >&2
+    failures=$((failures + 1))
+  fi
+done
+
+exit "$failures"
+REMOTE
+}
+
+setup_vscode_cmd() {
+  local requested_job=""
+  local requested_time=""
+  local apply_all=1
+  local apply_current=0
+  local local_only=0
+  local update_local=1
+  local manage_remote_extensions=1
+  local install_now=0
+  local jobs="" selected_jobs="" target_entry="" current_job="" home_path="" install_root="" commit=""
+  local job_id node alias
+  local -a extensions=()
+  local failures=0
+
+  while (($#)); do
+    case "$1" in
+      --job)
+        [[ $# -ge 2 ]] || die "Missing value for --job"
+        requested_job="$2"
+        apply_all=0
+        apply_current=0
+        shift 2
+        ;;
+      --all)
+        apply_all=1
+        apply_current=0
+        requested_job=""
+        shift
+        ;;
+      --current)
+        apply_all=0
+        apply_current=1
+        requested_job=""
+        shift
+        ;;
+      --local-only)
+        local_only=1
+        shift
+        ;;
+      --no-local-update)
+        update_local=0
+        shift
+        ;;
+      --no-remote-extensions)
+        manage_remote_extensions=0
+        shift
+        ;;
+      --install-now)
+        install_now=1
+        shift
+        ;;
+      -h|--help|help)
+        help_cmd update
+        return
+        ;;
+      *)
+        die "Unknown option for update/setup: $1"
+        ;;
+    esac
+  done
+
+  ensure_code_cli
+  check_vscode_update
+  if ((update_local)); then
+    update_local_extensions
+  fi
+
+  ensure_extensions_file
+  while IFS= read -r ext; do
+    require_extension_id "$ext"
+    extensions+=("$ext")
+  done < <(extension_ids)
+
+  printf 'Remote extension list: %s\n' "$EXTENSIONS_FILE"
+  if [[ "${#extensions[@]}" -eq 0 ]]; then
+    printf 'No remote extensions configured. Add them with: fasrc extensions add EXT_ID\n'
+  else
+    printf 'Configured remote extensions: %s\n' "${extensions[*]}"
+  fi
+
+  ensure_vscode_base_settings "$manage_remote_extensions"
+  printf 'Updated base VS Code workflow settings.\n'
+
+  if ((local_only)); then
+    return
+  fi
+
+  ensure_login_connection
+  jobs="$(list_remote_jobs)"
+  if [[ -z "$jobs" ]]; then
+    clear_current_job
+    write_placeholder_include
+    printf 'No active %s jobs. Local VS Code update/setup is complete.\n' "$JOB_NAME"
+    return
+  fi
+
+  target_entry="$(choose_default_entry "$jobs")"
+  current_job="${target_entry%%|*}"
+  write_compute_include "$jobs" "$current_job"
+
+  if [[ -n "$requested_job" ]]; then
+    selected_jobs="$(find_job_entry "$jobs" "$requested_job")" || die "Active $JOB_NAME job $requested_job was not found."
+  elif ((apply_current)); then
+    selected_jobs="$target_entry"
+  elif ((apply_all)); then
+    selected_jobs="$jobs"
+  fi
+
+  home_path="$(remote_home)"
+  install_root="$(vscode_server_install_root "$home_path")"
+  commit="$(local_vscode_commit)"
+  [[ -n "$commit" ]] || die "Could not determine local VS Code commit."
+
+  printf 'Remote VS Code server root: %s\n' "$install_root"
+
+  while IFS='|' read -r job_id node <&3; do
+    [[ -n "$job_id" ]] || continue
+    alias="$(job_alias "$job_id")"
+
+    ensure_vscode_remote_settings "$alias" "$install_root" "$manage_remote_extensions"
+
+    if ! probe_compute_alias "$alias"; then
+      reset_login_connection
+      if ! probe_compute_alias "$alias"; then
+        printf 'Skipping %s: SSH to %s is not responding.\n' "$job_id" "$alias" >&2
+        failures=$((failures + 1))
+        continue
+      fi
+    fi
+
+    if ((install_now)) && ((manage_remote_extensions)) && [[ "${#extensions[@]}" -gt 0 ]]; then
+      if ! install_remote_extensions "$alias" "$install_root" "$commit" "${extensions[@]}"; then
+        printf 'Remote extension setup had errors on %s.\n' "$alias" >&2
+        failures=$((failures + 1))
+      fi
+    else
+      printf 'Updated VS Code settings for %s.\n' "$alias"
+    fi
+  done 3<<<"$selected_jobs"
+
+  if [[ "$failures" -gt 0 ]]; then
+    return 1
+  fi
+}
+
+refresh_local_config() {
+  local jobs="$1"
+  local target_entry="$2"
+  local target_job
+
+  if [[ -z "$jobs" ]]; then
+    clear_current_job
+    write_placeholder_include
+    return
+  fi
+
+  target_job="${target_entry%%|*}"
+  write_compute_include "$jobs" "$target_job"
+  save_current_job "$target_job"
+}
+
+launch_cmd() {
+  local open_path=""
+  local open_path_set=0
+  local no_open=0
+  local force_new=0
+  local allocated_new=0
+  local requested_job=""
+  local requested_time=""
+  local count=1
+  local count_set=0
+  local time_set=0
+  local cpus_set=0
+  local mem_set=0
+  local partition_set=0
+  local account_set=0
+  local constraint_set=0
+  local gres_set=0
+  local qos_set=0
+  local reservation_set=0
+  local -a alloc_args=()
+  local jobs="" target_entry="" target_entries="" target_job="" target_alias="" home_path="" install_root="" uri=""
+
+  while (($#)); do
+    case "$1" in
+      --new)
+        force_new=1
+        shift
+        ;;
+      -n|--count)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        require_positive_integer "count" "$2"
+        count="$2"
+        count_set=1
+        force_new=1
+        shift 2
+        ;;
+      --job)
+        [[ $# -ge 2 ]] || die "Missing value for --job"
+        requested_job="$2"
+        shift 2
+        ;;
+      --time)
+        [[ $# -ge 2 ]] || die "Missing value for --time"
+        alloc_args+=("$1" "$2")
+        requested_time="$2"
+        time_set=1
+        force_new=1
+        shift 2
+        ;;
+      --cpus)
+        [[ $# -ge 2 ]] || die "Missing value for --cpus"
+        alloc_args+=(--cpus-per-task "$2")
+        cpus_set=1
+        force_new=1
+        shift 2
+        ;;
+      --mem|--partition|--account|--constraint|--gres|--qos|--reservation)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        alloc_args+=("$1" "$2")
+        case "$1" in
+          --mem) mem_set=1 ;;
+          --partition) partition_set=1 ;;
+          --account) account_set=1 ;;
+          --constraint) constraint_set=1 ;;
+          --gres) gres_set=1 ;;
+          --qos) qos_set=1 ;;
+          --reservation) reservation_set=1 ;;
+        esac
+        force_new=1
+        shift 2
+        ;;
+      --no-open)
+        no_open=1
+        shift
+        ;;
+      --)
+        shift
+        while (($#)); do
+          alloc_args+=("$1")
+          shift
+        done
+        force_new=1
+        ;;
+      -*)
+        die "Unknown option: $1. Use -- for raw sbatch args."
+        ;;
+      *)
+        ((open_path_set == 0)) || die "Only one remote path can be supplied."
+        open_path="$1"
+        open_path_set=1
+        shift
+        ;;
+    esac
+  done
+
+  if ((open_path_set == 0)) && [[ -n "$DEFAULT_REMOTE_PATH" ]]; then
+    open_path="$DEFAULT_REMOTE_PATH"
+  fi
+  open_path="$(resolve_remote_path_alias "$open_path")"
+
+  [[ -z "$requested_job" || "$force_new" -eq 0 ]] || die "Use either --job or --new/allocation options, not both."
+
+  if ((force_new)); then
+    if ((count_set == 0)); then
+      require_positive_integer "FASRC_DEFAULT_NEW_COUNT" "$DEFAULT_NEW_COUNT"
+      count="$DEFAULT_NEW_COUNT"
+    fi
+    if ((time_set)); then
+      require_slurm_time_within_limit "$requested_time"
+    else
+      require_slurm_time_within_limit "$DEFAULT_TIME"
+    fi
+  fi
+
+  ensure_code_cli
+  ensure_login_connection
+  bootstrap_remote_keys
+  install_remote_allocator
+
+  jobs="$(list_remote_jobs)"
+
+  if [[ -n "$jobs" ]]; then
+    target_entry="$(choose_default_entry "$jobs")" || target_entry=""
+    if [[ -n "$target_entry" ]]; then
+      write_compute_include "$jobs" "${target_entry%%|*}"
+    fi
+    target_entry=""
+  fi
+
+  if [[ -n "$requested_job" ]]; then
+    target_entry="$(find_job_entry "$jobs" "$requested_job")" || die "Active $JOB_NAME job $requested_job was not found."
+    target_entries="$target_entry"
+    target_alias="$(job_alias "$requested_job")"
+    if ! probe_compute_alias "$target_alias"; then
+      reset_login_connection
+      probe_compute_alias "$target_alias" || die "Active $JOB_NAME job $requested_job exists, but SSH to $target_alias is not responding."
+    fi
+  elif ((force_new)) || [[ -z "$jobs" ]]; then
+    if ((time_set)); then
+      require_slurm_time_within_limit "$requested_time"
+    else
+      require_slurm_time_within_limit "$DEFAULT_TIME"
+    fi
+    ((time_set)) || alloc_args+=(--time "$DEFAULT_TIME")
+    ((cpus_set)) || alloc_args+=(--cpus-per-task "$DEFAULT_CPUS")
+    ((mem_set)) || alloc_args+=(--mem "$DEFAULT_MEM")
+    ((partition_set)) || [[ -z "$DEFAULT_PARTITION" ]] || alloc_args+=(--partition "$DEFAULT_PARTITION")
+    ((account_set)) || [[ -z "$DEFAULT_ACCOUNT" ]] || alloc_args+=(--account "$DEFAULT_ACCOUNT")
+    ((constraint_set)) || [[ -z "$DEFAULT_CONSTRAINT" ]] || alloc_args+=(--constraint "$DEFAULT_CONSTRAINT")
+    ((gres_set)) || [[ -z "$DEFAULT_GRES" ]] || alloc_args+=(--gres "$DEFAULT_GRES")
+    ((qos_set)) || [[ -z "$DEFAULT_QOS" ]] || alloc_args+=(--qos "$DEFAULT_QOS")
+    ((reservation_set)) || [[ -z "$DEFAULT_RESERVATION" ]] || alloc_args+=(--reservation "$DEFAULT_RESERVATION")
+    if ((count > 1)); then
+      printf 'Submitting %s new jobs one second apart...\n' "$count" >&2
+    fi
+    target_entries="$(allocate_new_jobs "$count" "${alloc_args[@]}")" || die "Could not allocate requested job(s). Run 'fasrc status' to refresh any jobs that did start."
+    while IFS= read -r target_entry; do
+      [[ -n "$target_entry" ]] || continue
+      jobs="$(append_job_entry "$jobs" "$target_entry")"
+    done <<<"$target_entries"
+    target_entry="$(printf '%s\n' "$target_entries" | sed -n '1p')"
+    [[ -n "$target_entry" ]] || die "Allocator returned no job information."
+    allocated_new=1
+  else
+    target_entry="$(choose_default_entry "$jobs")" || die "No active $JOB_NAME job was found."
+    target_entries="$target_entry"
+    target_job="${target_entry%%|*}"
+    target_alias="$(job_alias "$target_job")"
+    if ! probe_compute_alias "$target_alias"; then
+      reset_login_connection
+      probe_compute_alias "$target_alias" || die "Default $JOB_NAME job $target_job exists, but SSH to $target_alias is not responding. Use 'fasrc new ...' for a new job or 'fasrc --job JOB_ID' for a specific other job."
+    fi
+  fi
+
+  refresh_local_config "$jobs" "$target_entry"
+
+  home_path="$(remote_home)"
+  install_root="$(vscode_server_install_root "$home_path")"
+
+  while IFS='|' read -r target_job _node <&3; do
+    [[ -n "$target_job" ]] || continue
+    target_alias="$(job_alias "$target_job")"
+
+    if ((allocated_new)); then
+      printf 'Allocated new job %s via alias %s.\n' "$target_job" "$target_alias" >&2
+      wait_for_compute_alias "$target_alias" || die "Allocated job $target_job, but SSH to $target_alias did not become ready within ${SSH_READY_TIMEOUT}s."
+    else
+      printf 'Reusing job %s via alias %s.\n' "$target_job" "$target_alias" >&2
+    fi
+
+    ensure_vscode_remote_settings "$target_alias" "$install_root"
+  done 3<<<"$target_entries"
+
+  if ((no_open)); then
+    return
+  fi
+
+  prepare_code_cli_limits
+  while IFS='|' read -r target_job _node <&3; do
+    [[ -n "$target_job" ]] || continue
+    target_alias="$(job_alias "$target_job")"
+    uri="$(build_remote_uri "$target_alias" "$home_path" "$open_path")"
+    if [[ "${FASRC_REUSE_WINDOW:-0}" == "1" ]]; then
+      code --folder-uri "$uri" </dev/null
+    else
+      code --new-window --folder-uri "$uri" </dev/null
+    fi
+  done 3<<<"$target_entries"
+}
+
+open_cmd() {
+  local requested_job=""
+
+  if (($# == 0)); then
+    launch_cmd
+    return
+  fi
+
+  case "$1" in
+    -h|--help|help)
+      help_cmd launch
+      return
+      ;;
+    --job)
+      [[ $# -ge 2 ]] || die "Missing value for --job"
+      requested_job="$2"
+      shift 2
+      ;;
+    --[0-9]*)
+      requested_job="${1#--}"
+      shift
+      ;;
+    --)
+      shift
+      [[ $# -ge 1 ]] || die "Usage: fasrc open JOB_ID [remote-path]"
+      requested_job="$1"
+      shift
+      ;;
+    [0-9]*)
+      requested_job="$1"
+      shift
+      ;;
+    *)
+      launch_cmd "$@"
+      return
+      ;;
+  esac
+
+  [[ "$requested_job" =~ ^[0-9]+$ ]] || die "Usage: fasrc open JOB_ID [remote-path]"
+  launch_cmd --job "$requested_job" "$@"
+}
+
+bootstrap_cmd() {
+  ensure_login_connection
+  bootstrap_remote_keys
+  printf 'FASRC authorized_keys bootstrap complete.\n'
+}
+
+login_cmd() {
+  local control_path=""
+
+  ensure_login_connection
+  control_path="$(ssh -G "$LOGIN_HOST" 2>/dev/null | awk '/^controlpath / {print $2; exit}')"
+
+  if ssh -O check "$LOGIN_HOST" >/dev/null 2>&1; then
+    printf 'Cached SSH login to %s is active.\n' "$LOGIN_HOST"
+    if [[ -n "$control_path" ]]; then
+      printf 'Control socket: %s\n' "$control_path"
+    fi
+    return
+  fi
+
+  die "Could not verify cached SSH login to $LOGIN_HOST."
+}
+
+status_cmd() {
+  local jobs target_entry current_job current_alias job_id node alias marker
+
+  ensure_login_connection
+  jobs="$(list_remote_jobs)"
+
+  if [[ -z "$jobs" ]]; then
+    clear_current_job
+    write_placeholder_include
+    printf 'No active %s jobs.\n' "$JOB_NAME"
+    return
+  fi
+
+  target_entry="$(choose_default_entry "$jobs")"
+  current_job="${target_entry%%|*}"
+  current_alias="$(job_alias "$current_job")"
+  write_compute_include "$jobs" "$current_job"
+
+  printf 'Current alias %s points to the preferred live job.\n' "$REMOTE_ALIAS"
+  printf 'Current preferred job: %s\n' "$current_alias"
+  while IFS='|' read -r job_id node; do
+    [[ -n "$job_id" ]] || continue
+    alias="$(job_alias "$job_id")"
+    marker=" "
+    if [[ "$job_id" == "$current_job" ]]; then
+      marker="*"
+    fi
+    printf '%s job %s on %s (%s)\n' "$marker" "$job_id" "$node" "$alias"
+  done <<<"$jobs"
+}
+
+stop_cmd() {
+  local stop_all=0
+  local requested_job=""
+  local jobs target_entry current_job remaining_jobs
+  local job_id node cancel_ids=""
+
+  while (($#)); do
+    case "$1" in
+      --all)
+        stop_all=1
+        shift
+        ;;
+      --job)
+        [[ $# -ge 2 ]] || die "Missing value for --job"
+        requested_job="$2"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for stop: $1"
+        ;;
+    esac
+  done
+
+  [[ "$stop_all" -eq 0 || -z "$requested_job" ]] || die "Use either --all or --job, not both."
+
+  ensure_login_connection
+  jobs="$(list_remote_jobs)"
+
+  if [[ -z "$jobs" ]]; then
+    clear_current_job
+    write_placeholder_include
+    printf 'No active %s jobs.\n' "$JOB_NAME"
+    return
+  fi
+
+  if ((stop_all)); then
+    while IFS='|' read -r job_id node; do
+      [[ -n "$job_id" ]] || continue
+      cancel_ids+=" $job_id"
+    done <<<"$jobs"
+  else
+    if [[ -n "$requested_job" ]]; then
+      target_entry="$(find_job_entry "$jobs" "$requested_job")" || die "Active $JOB_NAME job $requested_job was not found."
+    else
+      target_entry="$(choose_default_entry "$jobs")"
+    fi
+    current_job="${target_entry%%|*}"
+    cancel_ids=" $current_job"
+  fi
+
+  ssh -n "$LOGIN_HOST" "scancel${cancel_ids}"
+
+  remaining_jobs="$(list_remote_jobs)"
+  if [[ -z "$remaining_jobs" ]]; then
+    clear_current_job
+    write_placeholder_include
+    printf 'Cancelled requested job(s); no active %s jobs remain.\n' "$JOB_NAME"
+    return
+  fi
+
+  target_entry="$(choose_default_entry "$remaining_jobs")"
+  refresh_local_config "$remaining_jobs" "$target_entry"
+  printf 'Cancelled requested job(s); refreshed %s aliases.\n' "$REMOTE_ALIAS"
+}
+
+if [[ "${FASRC_SOURCE_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+[[ -f "$SSH_INCLUDE" ]] || write_placeholder_include
+
+subcommand="${1:-launch}"
+case "$subcommand" in
+  launch)
+    shift || true
+    launch_cmd "$@"
+    ;;
+  resume)
+    shift || true
+    launch_cmd "$@"
+    ;;
+  open)
+    shift || true
+    open_cmd "$@"
+    ;;
+  new)
+    shift || true
+    launch_cmd --new "$@"
+    ;;
+  update|setup)
+    shift || true
+    setup_vscode_cmd "$@"
+    ;;
+  extensions|extension|ext)
+    shift || true
+    extensions_cmd "$@"
+    ;;
+  paths|path|path-aliases|aliases)
+    shift || true
+    paths_cmd "$@"
+    ;;
+  login|auth)
+    shift || true
+    login_cmd "$@"
+    ;;
+  bootstrap)
+    shift || true
+    bootstrap_cmd "$@"
+    ;;
+  status)
+    shift || true
+    status_cmd "$@"
+    ;;
+  stop)
+    shift || true
+    stop_cmd "$@"
+    ;;
+  -h|--help|help)
+    shift || true
+    help_cmd "$@"
+    ;;
+  *)
+    launch_cmd "$@"
+    ;;
+esac

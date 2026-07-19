@@ -1,8 +1,9 @@
-# Contributing a Skill
+# Contributing
 
-Thanks for contributing! Follow these steps to add a new skill to the repository.
+Thanks for contributing! This repository contains both agent skills and shared
+workflow utilities.
 
-## Steps
+## Contributing a skill
 
 1. **Fork** this repository.
 2. **Create a folder** under `skills/` with your skill name. Use lowercase letters and hyphens (e.g., `skills/my-new-skill/`).
@@ -19,6 +20,19 @@ Thanks for contributing! Follow these steps to add a new skill to the repository
 - Prefer short, structured output formats over open-ended prose.
 - One skill per folder.
 - If your skill builds on an existing one, mention it in the description.
+
+## Contributing a utility
+
+Utilities live under `utilities/` and should be self-contained.
+
+1. Create a folder under `utilities/` with a lowercase hyphenated name.
+2. Include a `README.md` explaining what the utility changes, how to install it,
+   how to uninstall or clean up, and how to verify the install.
+3. Include an installer script only when installation is actually needed.
+4. Avoid hardcoded personal paths, usernames, tokens, or machine-specific
+   configuration.
+5. Make installers idempotent: re-running them should update the utility safely.
+6. Document every user-owned file the utility edits.
 
 ## Questions?
 

@@ -1,0 +1,6 @@
+# Remote VS Code extensions for `fasrc setup` and `fasrc update`.
+# Add one extension ID per line.
+james-yu.latex-workshop
+anthropic.claude-code
+oscarphysics.claudetex
+openai.chatgpt
