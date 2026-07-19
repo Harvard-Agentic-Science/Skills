@@ -143,6 +143,8 @@ tmp_file="$(mktemp)"
 {
   cat <<EOF
 $managed_begin
+Include "$SSH_INCLUDE"
+
 Host $FASRC_ALIAS
   HostName $FASRC_HOST
   User $FASRC_USER
@@ -155,9 +157,9 @@ Host $FASRC_ALIAS
   ControlPersist 96h
   ServerAliveInterval 60
   ServerAliveCountMax 3
-$managed_end
 
-Include "$SSH_INCLUDE"
+Host *
+$managed_end
 
 EOF
   awk \
