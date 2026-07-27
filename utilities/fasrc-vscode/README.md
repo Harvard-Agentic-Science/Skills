@@ -158,9 +158,12 @@ FASRC_DEFAULT_MEM=16G
 FASRC_DEFAULT_PARTITION=shared
 FASRC_DEFAULT_ACCOUNT=my_lab
 FASRC_SUBMIT_INTERVAL=1
+FASRC_VSCODE_SERVER_INSTALL_ROOT="/scratch/YOUR_USERNAME/vscode-server-fasrc"
 ```
 
 For multi-job launches, `FASRC_SUBMIT_INTERVAL` must be at least `0.5` seconds.
+The server-root override is optional; see [Persistence](#persistence) before
+using a node-local path.
 
 With `FASRC_DEFAULT_NEW_COUNT=3`, `fasrc new` behaves like `fasrc new -n 3`.
 The plain `fasrc` command still reuses one existing job, and if no job exists it
@@ -306,6 +309,13 @@ FASRC home directories are shared across compute nodes, so one VS Code server
 and one remote extension setup can be reused by multiple live compute jobs.
 That is the part that avoids repeatedly downloading the VS Code server and
 extensions into per-node `/tmp`.
+
+If the shared home filesystem makes the initial server extraction stall, set
+`FASRC_VSCODE_SERVER_INSTALL_ROOT` in `~/.config/fasrc/defaults.env` to a
+private, user-owned directory on node-local storage. This makes startup faster,
+but each compute node needs its own server installation. Do not use a
+world-writable directory directly; use a private subdirectory owned by your
+account.
 
 The `fasrc-compute` alias points to the current preferred job after `fasrc status`
 or a launch command. It uses that node's real host-key identity with

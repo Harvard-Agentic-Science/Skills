@@ -91,6 +91,10 @@ FASRC_ALLOW_UNSUPPORTED_PLATFORM=1 \
 runtime_login_host="$(HOME="$ALIAS_HOME" FASRC_SOURCE_ONLY=1 bash -c 'source "$1"; printf "%s\n" "$LOGIN_HOST"' _ "$ALIAS_HOME/.local/bin/fasrc")"
 [[ "$runtime_login_host" == 'harvard-fasrc' ]] || fail "custom installer login alias was not persisted"
 
+printf '%s\n' 'FASRC_VSCODE_SERVER_INSTALL_ROOT=/scratch/fasrc-smoke-user/vscode-server' >"$TEST_HOME/.config/fasrc/defaults.env"
+runtime_server_root="$(HOME="$TEST_HOME" FASRC_SOURCE_ONLY=1 bash -c 'source "$1"; printf "%s\n" "$VSCODE_SERVER_INSTALL_ROOT_OVERRIDE"' _ "$FASRC_BIN")"
+[[ "$runtime_server_root" == '/scratch/fasrc-smoke-user/vscode-server' ]] || fail "VS Code server root was not loaded from defaults"
+
 HOME="$TEST_HOME" "$FASRC_BIN" help env >"$TEST_HOME/help.txt"
 grep -q 'Default: fasrc-vscode' "$TEST_HOME/help.txt" || fail "job-name default is undocumented"
 grep -q 'Default: shared' "$TEST_HOME/help.txt" || fail "shared partition default is undocumented"
