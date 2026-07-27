@@ -29,7 +29,8 @@ load_defaults_file() {
       FASRC_DEFAULT_TIME|FASRC_DEFAULT_CPUS|FASRC_DEFAULT_MEM|FASRC_DEFAULT_NEW_COUNT|\
       FASRC_DEFAULT_REMOTE_PATH|FASRC_DEFAULT_PARTITION|FASRC_DEFAULT_ACCOUNT|\
       FASRC_DEFAULT_CONSTRAINT|FASRC_DEFAULT_GRES|FASRC_DEFAULT_QOS|\
-      FASRC_DEFAULT_RESERVATION|FASRC_MAX_SLURM_TIME|FASRC_SUBMIT_INTERVAL)
+      FASRC_DEFAULT_RESERVATION|FASRC_MAX_SLURM_TIME|FASRC_SUBMIT_INTERVAL|\
+      FASRC_VSCODE_SERVER_INSTALL_ROOT)
         ;;
       *)
         printf 'Unsupported defaults key in %s: %s\n' "$DEFAULTS_FILE" "$key" >&2
@@ -1215,6 +1216,16 @@ ensure_login_connection() {
 
 reset_login_connection() {
   local control_path
+
+  if ssh -O check "$LOGIN_HOST" >/dev/null 2>&1 &&
+     run_with_timeout 8 \
+       ssh \
+         -o BatchMode=yes \
+         -o ConnectTimeout="$SSH_LOGIN_CONNECT_TIMEOUT" \
+         "$LOGIN_HOST" true >/dev/null 2>&1; then
+    printf 'Keeping the healthy cached SSH login to %s after a compute-node probe failed.\n' "$LOGIN_HOST" >&2
+    return
+  fi
 
   printf 'Refreshing %s SSH control connection after a compute-node probe failed.\n' "$LOGIN_HOST" >&2
   run_with_timeout 8 ssh -O exit "$LOGIN_HOST" >/dev/null 2>&1 || true

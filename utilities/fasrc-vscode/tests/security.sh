@@ -49,6 +49,25 @@ grep -qxF '  HostName compute.example.edu' "$SSH_INCLUDE" || fail "current alias
 grep -qxF '  HostKeyAlias compute.example.edu' "$SSH_INCLUDE" || fail "compute host-key identity is missing"
 grep -qxF '  StrictHostKeyChecking accept-new' "$SSH_INCLUDE" || fail "compute host verification is not enabled"
 
+login_ops="$TEST_HOME/login-ops"
+(
+  ssh() {
+    printf '%s\n' "$*" >>"$login_ops"
+    if [[ "$1" == "-O" && "$2" == "check" ]]; then
+      return 0
+    fi
+    [[ "$*" == *"BatchMode=yes"* && "${*: -1}" == "true" ]]
+  }
+  run_with_timeout() {
+    shift
+    "$@"
+  }
+  reset_login_connection
+)
+grep -q -- '-O check' "$login_ops" || fail "cached login health was not checked"
+grep -q -- 'BatchMode=yes' "$login_ops" || fail "cached login traffic was not verified"
+! grep -q -- '-O exit' "$login_ops" || fail "healthy cached login was discarded"
+
 cat >"$CODE_USER_SETTINGS" <<'JSONC'
 {
   // Existing user choices must survive setup.
